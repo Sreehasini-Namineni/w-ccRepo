@@ -276,6 +276,15 @@ window.SKY = window.SKY || {};
         { t: 'reply', ref: 'commit:census' },
         { t: 'commit', key: 'census-partial', ws: 'Employee data import', owner: 'dana', what: 'Partial census (salaried staff)', due: nextDow(now, 2, 17), supersedes: 'census', quote: 'I can send the salaried employees by Tuesday' }
       ] }),
+    nwLive: (now) => ({ id: 'l-nw', src: 'email', where: 'Inbox', ts: plus(now, 20), from: 'omar', to: ['you', 'grace'], subject: 'We are live!', thread: 'nw-live',
+      body: 'Hi Jordan,\n\nFirst live payroll ran clean this morning. Payroll, tax, time & attendance and onboarding are all signed off on our side. Grace sent the garnishment list over too.\n\nThanks to the whole team!\nOmar',
+      signals: [
+        { t: 'progress', ws: 'Payroll setup', pct: 100, quote: 'First live payroll ran clean this morning.' },
+        { t: 'progress', ws: 'Tax setup', pct: 100, quote: 'Payroll, tax, time & attendance and onboarding are all signed off on our side.' },
+        { t: 'progress', ws: 'Time & attendance', pct: 100, quote: 'Payroll, tax, time & attendance and onboarding are all signed off on our side.' },
+        { t: 'progress', ws: 'Onboarding', pct: 100, quote: 'Payroll, tax, time & attendance and onboarding are all signed off on our side.' },
+        { t: 'fulfill', key: 'nw-garn', quote: 'Grace sent the garnishment list over too.' }
+      ] }),
     censusFile: (now) => ({ id: 'f-census', src: 'email', where: 'Inbox', ts: plus(now, 30), from: 'dana', to: ['you', 'marcus'], subject: 'Census file (salaried)', thread: 'fu-census',
       body: "Hi all,\n\nHere's the salaried census file: 412 employees. Hourly to follow Friday.\n\nDana",
       signals: [

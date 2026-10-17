@@ -435,7 +435,8 @@
         else if (iss.some((i) => i.kind === 'smoke' && open(i))) status = 'smoke';
         else if (iss.some((i) => i.kind === 'quiet')) status = 'quiet';
         else if (c.opps.some((o) => o.wsId === id)) status = 'opp';
-        return { id, name: w.name, aliases: w.aliases, pct: w.pct, pctCorrected: !!w.pctCorrected, pctMsg: w.pctMsg, pctQuote: w.pctQuote, recent: w.recent, lastTs: w.lastTs, deadlines: w.deadlines,
+        else if (w.pct >= 100) status = 'done';
+        return { id, name: w.name, aliases: w.aliases, pct: w.pct, msgTotal: w.msgIds.size, pctCorrected: !!w.pctCorrected, pctMsg: w.pctMsg, pctQuote: w.pctQuote, recent: w.recent, lastTs: w.lastTs, deadlines: w.deadlines,
           status, relit: iss.some((i) => i.status === 'relit'), opp: c.opps.some((o) => o.wsId === id), issues: iss };
       });
       const counts = {
@@ -450,7 +451,9 @@
       out.clients[c.id] = {
         id: c.id, name: c.name, domain: c.domain, project: c.project, goLive: c.goLive, how: c.how,
         people: [...c.people], internal: [...c.internal], msgCount: c.msgs.length,
-        ws, issues: c.issues, jams: c.jams, opps: c.opps, commits: c.commits, corrected: c.corrected, counts,
+        ws, issues: c.issues, jams: c.jams,
+        // every building finished: the project can be archived
+        done: ws.length > 0 && ws.every((w) => w.pct >= 100), opps: c.opps, commits: c.commits, corrected: c.corrected, counts,
         score: counts.fire * 6 + counts.jam * 3 + counts.waiting + counts.smoke * 2 + counts.quiet
       };
     });

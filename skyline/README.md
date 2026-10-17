@@ -15,7 +15,7 @@ Use **DEMO ▾** (top right) to drive the story:
 3. **Reset**, send again, then choose **Dana replies**. The promise is renegotiated, and the building stays contained while Skyline watches the new date.
 4. **The census file arrives**. The fire goes out, the blocked people can start, and the building grows.
 5. **Play the live feed**. New messages arrive one at a time and every agent re-runs on each one.
-6. **Break the Scout agent**, then open **Admin**. Scout shows as failed and the rest of the city keeps working.
+6. **Northwind Foods goes live**. Omar signs off every workstream, so all of Northwind's buildings reach 100% and the project is complete. Choose **Archive project** in the top-left panel or on its Region card. The whole city moves to the **Archives** tab, and **Restore** brings it back to your region.
 
 ## How it fits together
 
@@ -52,7 +52,7 @@ Intake → Cartographer → Surveyor → Traffic → Fire watch → Scout → Di
 | Next best action + drafted follow-ups you review | NEXT BEST ACTION → **Fix this issue**: email draft (editable, with tone and the context it used), meeting invite (suggested times, agenda), or escalation |
 | Detect replies, relight unresolved alarms | Dispatcher agent; demo **Dana replies** and **Jump to next business morning** |
 | Manager view of mini skylines, prioritized | **Region**: sorted by fires, blocked people, smoke and dark buildings |
-| Admin: agent failures, duplicate prevention | **Admin**: agent health, errors with Retry, connector events, every duplicate refused |
+| Finished projects | When every building in a client's city is at 100%, **Archive project** appears in the top-left panel, on the Region card and in each building's panel. The **Archives** tab lists archived projects as mini skylines with a Restore button |
 
 The picker in the SKYLINE header switches between Consultant, Project manager, Account exec and Client view. Client view hides internal Slack evidence, opportunities and actions.
 

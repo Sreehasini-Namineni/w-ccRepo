@@ -32,11 +32,12 @@
     return {
       now: SKY.DEMO_START, messages: SKY.messages.slice(), access: clone(SKY.defaultAccess),
       corrections: [], followUps: {}, faults: {}, view: 'city', client: 'brightline', sel: null, profile: 'consultant',
-      runs: [], model: null, toast: null, live: null, modal: null, demoOpen: false, busScope: 'client', citySig: null, detail: 'open', editPct: null
+      runs: [], model: null, toast: null, live: null, modal: null, demoOpen: false, busScope: 'client', citySig: null, detail: 'open', editPct: null, archived: {}
     };
   }
 
-  const cl = () => S.model.clients[S.client] || S.model.clients[S.model.order[0]];
+  const active = () => S.model.order.filter((id) => !S.archived[id]); // archived projects leave the region
+  const cl = () => S.model.clients[S.client] || S.model.clients[active()[0]];
   const msg = (id) => S.model.msgsById[id] || S.messages.find((m) => m.id === id);
   const wsById = (c, id) => c.ws.find((w) => w.id === id);
   const allIssues = (c) => c.issues;
@@ -51,15 +52,15 @@
   // ---------------- pipeline + diff ----------------
   function recompute(trigger, incoming) {
     const prev = S.model;
-    const m = SKY.runPipeline({ messages: S.messages, now: S.now, access: S.access, corrections: S.corrections, followUps: S.followUps, faults: S.faults });
+    const m = SKY.runPipeline({ messages: S.messages, now: S.now, access: S.access, corrections: S.corrections, followUps: S.followUps, faults: S.faults, archived: S.archived });
     S.model = m;
     const key = (e) => e.client + '|' + e.from + '|' + e.text;
     const prevKeys = new Set(prev ? prev.log.map(key) : []);
     const entries = prev ? m.log.filter((e) => !prevKeys.has(key(e))) : m.log;
     S.runs.unshift({ trigger, at: S.now, entries });
     S.runs = S.runs.slice(0, 20);
-    if (!m.order.length) { S.toast = null; if (S.view === 'city' || S.view === 'region') S.view = 'sources'; render(); return []; }
-    if (!m.clients[S.client]) S.client = m.order[0];
+    if (!active().length) { S.toast = null; if (S.view === 'city') S.view = m.order.length ? 'archives' : 'sources'; render(); return []; }
+    if (!m.clients[S.client] || S.archived[S.client]) S.client = active()[0];
     let ev = [];
     if (prev && prev.order.length) {
       ev = diff(prev, m);
@@ -102,8 +103,10 @@
         else if (pw.status === 'fire' || pw.status === 'contained') ev.push(Object.assign(e, { tone: 'ok', title: 'Fire out at ' + w.name, body: 'The promise was delivered. Skyline cleared the alarm and the traffic behind it.' }));
         else if (pw.status === 'quiet') ev.push(Object.assign(e, { tone: 'ok', title: 'Lights back on at ' + w.name, body: 'Someone is talking about it again.' }));
         else if (w.status === 'smoke') ev.push(Object.assign(e, { tone: 'smoke', title: 'Smoke at ' + w.name, body: fire ? fire.title : '' }));
+        else if (w.status === 'done') ev.push(Object.assign(e, { tone: 'ok', title: w.name + ' is done', body: 'It reached 100%.' }));
         else if (w.status === 'quiet') ev.push(Object.assign(e, { tone: 'quiet', title: 'Lights off at ' + w.name, body: fire ? fire.title : '' }));
       });
+      if (cb.done && !ca.done) ev.unshift({ client: cb.id, tone: 'ok', title: cb.name + ' is complete', body: 'Every building is at 100%. You can archive the project from the top-left panel or the Region page.' });
       cb.issues.forEach((i) => {
         const pi = ca.issues.find((x) => x.id === i.id);
         if (pi && ((i.renegotiated && !pi.renegotiated) || (i.reply && !pi.reply))) ev.push({ client: cb.id, sel: 'ws:' + i.wsId, tone: 'ok', title: first(i.owner) + ' replied', body: i.note });
@@ -155,7 +158,7 @@
     const w = window.innerWidth, h = window.innerHeight;
     const s = Math.min(w / 1560, h / 960) * (w < 900 ? 1.2 : 1);
     // nudge the city right of the HUD on wide screens
-    $('holder').style.transform = (w < 900 ? 'translateY(-40px) ' : 'translate(' + Math.round(Math.min(60, (w - 1200) / 4)) + 'px, 10px) ') + 'scale(' + s.toFixed(3) + ')';
+    $('holder').style.transform = (w < 900 ? 'translateY(-40px) ' : 'translate(' + Math.round(Math.min(60, (w - 1200) / 4)) + 'px, 34px) ') + 'scale(' + s.toFixed(3) + ')';
   }
 
   const PROFILES = [
@@ -164,15 +167,6 @@
     { id: 'exec', label: 'ACCOUNT EXEC', desc: 'Relationship health and growth' },
     { id: 'client', label: 'CLIENT VIEW', desc: 'What the client sees' }
   ];
-  function profileNote(c) {
-    const k = c.counts;
-    const out = Object.keys(S.followUps).filter((id) => { const f = findItem(id); return f && f.c.id === c.id; }).length;
-    const actions = c.issues.filter((i) => i.status !== 'contained').length + c.opps.filter((o) => !o.sentTo).length;
-    if (S.profile === 'consultant') return 'Viewing as Consultant · ' + plural(actions, 'next action') + ' for you, ' + plural(out, 'follow-up') + ' out';
-    if (S.profile === 'pm') return 'Viewing as Project manager · ' + plural(k.fire, 'fire') + ', ' + plural(k.waiting, 'person', 'people') + ' blocked, ' + plural(k.quiet, 'dark building');
-    if (S.profile === 'exec') return 'Viewing as Account exec · ' + plural(k.opp, 'opportunity', 'opportunities') + ', ' + (k.fire ? 'client trust at risk' : 'relationship steady');
-    return 'Viewing as Client · shared promises only, internal notes hidden';
-  }
   function daysTo(ts) { return Math.ceil((ts - t(S.now)) / DAY); }
 
   function renderHud() {
@@ -183,7 +177,7 @@
       '<div class="panel"><div class="phead teal"><span>SKYLINE</span><select class="viewas" data-act="profile-select" aria-label="View as">' + PROFILES.map((p) => '<option value="' + p.id + '"' + (S.profile === p.id ? ' selected' : '') + '>' + p.label + '</option>').join('') + '</select></div>' +
       '<div class="hud-body"><div class="hud-name">' + esc(c.name) + '</div>' +
       '<div class="hud-sub">' + esc(c.project || 'Implementation') + (c.goLive ? ' · go-live in ' + daysTo(c.goLive) + ' days' : '') + '</div>' +
-      '<div class="hud-note">' + esc(profileNote(c)) + '</div>' +
+      (c.done ? '<div class="donebox hud-done"><div><b>✓ Project complete</b><span>All ' + c.ws.length + ' buildings are at 100%.</span></div><button type="button" class="btn btn-p btn-sm" data-act="archive" data-id="' + c.id + '">ARCHIVE PROJECT</button></div>' : '') +
       '<button type="button" class="hud-back" data-act="view" data-view="region">← All my clients</button></div></div>' +
       (tst ? '<div class="panel toast" role="status"' + (tst.sel && tst.client === c.id ? ' data-act="pick" data-pick="' + tst.sel + '" style="cursor:pointer"' : '') + '><span class="dot" style="background:' + dot + '"></span><div>' +
         '<span class="toast-tag">JUST HEARD · ' + esc(F.dt(tst.at)) + (tst.client && tst.client !== c.id ? ' · ' + esc(S.model.clients[tst.client].name.toUpperCase()) : '') + '</span>' +
@@ -191,16 +185,16 @@
   }
 
   function renderNav() {
-    const fires = Object.values(S.model.clients).reduce((n, c) => n + c.counts.fire, 0);
-    const errs = S.model.errors.length;
-    const tab = (v, label, n) => '<button type="button" class="nav-tab" data-act="view" data-view="' + v + '"' + (S.view === v ? ' aria-current="page"' : '') + '>' + label + (n ? '<span class="n">' + n + '</span>' : '') + '</button>';
-    $('nav').innerHTML = tab('city', 'CITY') + tab('region', 'REGION', fires) + tab('sources', 'SOURCES') + tab('agents', 'AGENTS') + tab('admin', 'ADMIN', errs) +
+    const fires = active().reduce((n, id) => n + S.model.clients[id].counts.fire, 0);
+    const nArch = Object.keys(S.archived).length;
+    const tab = (v, label, n, calm) => '<button type="button" class="nav-tab" data-act="view" data-view="' + v + '"' + (S.view === v ? ' aria-current="page"' : '') + '>' + label + (n ? '<span class="n' + (calm ? ' calm' : '') + '">' + n + '</span>' : '') + '</button>';
+    $('nav').innerHTML = tab('city', 'CITY') + tab('region', 'REGION', fires) + tab('sources', 'SOURCES') + tab('agents', 'AGENTS') + tab('archives', 'ARCHIVES', nArch, true) +
       '<span class="clock" title="Demo clock">' + (S.live ? '<span class="live-dot" aria-hidden="true"></span>' : '') + esc(F.dt(S.now).toUpperCase()) + '</span>' +
       '<button type="button" class="nav-tab demo-btn" data-act="demo" aria-expanded="' + S.demoOpen + '">DEMO ▾</button>';
   }
 
   // ---------------- detail panel ----------------
-  const HEADS = { ok: ['#9CC2B4', INK, 'HEALTHY'], fire: ['#F0552E', '#FFFFFF', 'ON FIRE'], contained: ['#CFE3DA', INK, 'CONTAINED'], quiet: ['#3E4B5A', '#EEF2F1', 'LIGHTS OFF'], smoke: ['#D6DCE1', INK, 'SMOKY'], opp: ['#F2C230', INK, 'OPPORTUNITY'], jam: ['#E9C46A', INK, 'BLOCKED HANDOFF'], jamcalm: ['#F3E2A6', INK, 'WAITING'], park: ['#4F7B8E', '#FFFFFF', 'SWITCH PROFILE'] };
+  const HEADS = { ok: ['#9CC2B4', INK, 'HEALTHY'], fire: ['#F0552E', '#FFFFFF', 'ON FIRE'], contained: ['#CFE3DA', INK, 'CONTAINED'], quiet: ['#3E4B5A', '#EEF2F1', 'LIGHTS OFF'], smoke: ['#D6DCE1', INK, 'SMOKY'], opp: ['#F2C230', INK, 'OPPORTUNITY'], jam: ['#E9C46A', INK, 'BLOCKED HANDOFF'], jamcalm: ['#F3E2A6', INK, 'WAITING'], done: ['#9CC2B4', INK, 'DONE'] };
   const head = (name, key, label) => {
     const h = HEADS[key];
     const full = S.detail === 'full';
@@ -236,6 +230,7 @@
     if (w.status === 'contained') return 'Fire contained. ' + (fire && fire.note ? fire.note : '');
     if (w.status === 'smoke') return 'Smoke, not fire yet. ' + w.issues.filter((i) => i.kind === 'smoke').map((i) => i.title).join('. ') + '.';
     if (w.status === 'quiet') return 'Every window is dark. ' + w.issues.find((i) => i.kind === 'quiet').title + '.';
+    if (w.status === 'done') return 'All done. Every piece of ' + lc(w.name) + ' is complete.';
     if (w.status === 'opp') return 'Healthy, and lit up: ' + first(opp.owner) + ' asked about ' + lc(opp.title) + '.';
     return w.pct + '% done with ' + plural(w.recent, 'message') + ' this week. ' + (w.issues.length ? plural(w.issues.length, 'thing') + ' to keep an eye on.' : 'Nothing needs you here.');
   }
@@ -256,6 +251,9 @@
       '<div><div class="k">Open risks</div><div class="v">' + openRisks + '</div></div></div>' +
       '<p class="summary">' + esc(wsSummary(c, w)) + '</p>';
     body += blockedByBox(c, w) + waitingBox(c, w);
+    if (w.pct >= 100 && !cv) body += c.done
+      ? '<div class="donebox"><div><b>✓ The whole project is complete</b><span>Every building in ' + esc(c.name) + ' is at 100%.</span></div><button type="button" class="btn btn-p" data-act="archive" data-id="' + c.id + '">ARCHIVE PROJECT</button></div>'
+      : '<div class="donebox"><div><b>✓ This building is complete</b><span>' + plural(c.ws.filter((x) => x.pct < 100).length, 'building') + ' to go before the project can be archived.</span></div></div>';
     if (w.pctMsg && !issues.length && !opps.length) body += evidenceList([{ msgId: w.pctMsg.id, quote: w.pctQuote || w.pctMsg.body.split('\n')[0], by: w.pctMsg.from, role: 'Latest progress' }]);
     if (w.pctCorrected) body += '<p class="note">Progress set by you. Skyline keeps your number until you undo it below.</p>';
     body += issues.map((i, k) => issueCard(c, i, k === 0)).join('');
@@ -568,23 +566,24 @@
   // ---------------- pages ----------------
   function renderPage() {
     const v = S.view;
-    $('page').innerHTML = '<div class="page-in">' + (v === 'region' ? regionPage() : v === 'sources' ? sourcesPage() : v === 'agents' ? agentsPage() : adminPage()) + '</div>';
+    $('page').innerHTML = '<div class="page-in">' + (v === 'region' ? regionPage() : v === 'sources' ? sourcesPage() : v === 'agents' ? agentsPage() : archivesPage()) + '</div>';
   }
 
   function regionPage() {
-    const ids = S.model.order;
+    const ids = active();
     const cards = ids.map((id, k) => {
       const c = S.model.clients[id];
       const n = c.counts;
       const top = c.issues.filter((i) => i.status !== 'contained').sort((a, b) => ({ fire: 0, smoke: 1, watch: 2, quiet: 3 }[a.kind] - { fire: 0, smoke: 1, watch: 2, quiet: 3 }[b.kind]))[0];
       const cnt = (v, label, color) => '<span class="count' + (v ? '' : ' zero') + '"><span class="dot" style="background:' + color + '"></span>' + v + ' ' + label + '</span>';
-      const flag = k === 0 && c.score > 0 ? '<span>NEEDS YOU FIRST</span>' : '<span>' + (c.score ? 'WATCH' : 'HEALTHY') + '</span>';
+      const flag = k === 0 && c.score > 0 ? '<span>NEEDS YOU FIRST</span>' : '<span>' + (c.done ? '✓ COMPLETE' : c.score ? 'WATCH' : 'HEALTHY') + '</span>';
       return '<div class="panel ccard" role="button" tabindex="0" data-act="open-client" data-id="' + id + '" aria-label="Open ' + esc(c.name) + '">' +
         '<div class="phead ' + (k === 0 && c.score > 0 ? '' : 'teal') + '" style="' + (k === 0 && c.score > 0 ? 'background:var(--fire);color:#fff' : '') + ';width:100%"><span>' + esc(c.name.toUpperCase()) + '</span>' + flag + '</div>' +
         '<div class="mini"><div class="holder"><div class="plane">' + SKY.renderCity(c, { mini: true }) + '</div></div></div>' +
         '<div class="ccard-body"><div class="ccard-sub">' + esc(c.project || '') + (c.goLive ? ' · go-live ' + F.day(c.goLive) + ' (' + daysTo(c.goLive) + ' days)' : '') + '</div>' +
         '<div class="counts">' + cnt(n.fire, n.fire === 1 ? 'fire' : 'fires', 'var(--fire)') + cnt(n.waiting, 'blocked', 'var(--jam)') + cnt(n.smoke, 'smoky', 'var(--smoke)') + cnt(n.quiet, 'dark', 'var(--quiet)') + cnt(n.opp, n.opp === 1 ? 'opportunity' : 'opportunities', 'var(--gold)') + '</div>' +
-        (top ? '<div class="ccard-top">' + esc(top.title) + '</div>' : '<div class="ccard-top">Nothing needs you here.</div>') + '</div></div>';
+        (top ? '<div class="ccard-top">' + esc(top.title) + '</div>' : '<div class="ccard-top">Nothing needs you here.</div>') +
+        (c.done ? '<div class="donebox"><div><b>✓ Project complete</b><span>Every building is at 100%.</span></div><button type="button" class="btn btn-p btn-sm" data-act="archive" data-id="' + id + '">ARCHIVE PROJECT</button></div>' : '') + '</div></div>';
     }).join('');
     return '<div><h1>Your region</h1><p class="lede">' + plural(ids.length, 'client') + ' as mini skylines, sorted so the city that needs help most comes first. Fires and blocked people count the most. Click a skyline to walk its streets.</p></div><div class="region">' + cards + '</div>';
   }
@@ -626,7 +625,7 @@
   function agentsPage() {
     const st = S.model.stats;
     const av = (id) => { const a = SKY.AGENTS.find((x) => x.id === id); return a ? '<span class="av" style="background:' + a.color + '">' + a.name.slice(0, 2).toUpperCase() + '</span>' : '<span class="av" style="background:#9AA8B2">AD</span>'; };
-    const nm = (id) => id === 'all' ? 'all agents' : id === 'admin' ? 'admin' : (SKY.AGENTS.find((x) => x.id === id) || { name: id }).name;
+    const nm = (id) => id === 'all' ? 'all agents' : id === 'admin' ? 'the team' : (SKY.AGENTS.find((x) => x.id === id) || { name: id }).name;
     const list = SKY.AGENTS.map((a) => '<div class="agent">' + av(a.id) + '<div><b>' + esc(a.name) + '</b> <span class="pill ' + (st[a.id].status === 'ok' ? 'on' : 'bad') + '">' + (st[a.id].status === 'ok' ? 'OK' : 'FAILED') + '</span><p>' + esc(a.role) + '</p></div></div>').join('');
     const scope = S.busScope;
     const runs = S.runs.map((r) => {
@@ -639,17 +638,19 @@
       '<div class="panel"><div class="phead ink"><span>MESSAGE BUS</span><span class="seg" role="group" aria-label="Scope"><button type="button" data-act="bus" data-scope="client" aria-pressed="' + (scope === 'client') + '">' + esc(S.model.order.length ? cl().name.toUpperCase() : 'THIS CLIENT') + '</button><button type="button" data-act="bus" data-scope="all" aria-pressed="' + (scope === 'all') + '">ALL CLIENTS</button></span></div>' + runs + '</div></div>';
   }
 
-  function adminPage() {
-    const st = S.model.stats;
-    const rows = SKY.AGENTS.map((a) => '<tr><td><b>' + esc(a.name) + '</b></td><td><span class="pill ' + (st[a.id].status === 'ok' ? 'on' : 'bad') + '">' + (st[a.id].status === 'ok' ? 'OK' : 'FAILED') + '</span></td><td class="num">' + st[a.id].processed + '</td><td class="num">' + st[a.id].errors + '</td><td class="num">' + st[a.id].ms.toFixed(1) + ' ms</td></tr>').join('');
-    const errs = S.model.errors.map((e) => '<li><span class="pill bad">' + esc((SKY.AGENTS.find((a) => a.id === e.agent) || {}).name || e.agent) + '</span><span>' + esc(e.text) + '</span>' + (e.retry ? '<button type="button" class="btn btn-sm when" data-act="retry">Retry</button>' : '') + '</li>').join('') +
-      SKY.connectorEvents.map((e) => '<li><span class="pill ' + (e.level === 'warn' ? 'warn' : 'on') + '">' + esc(e.source.toUpperCase()) + '</span><span>' + esc(e.text) + '</span><span class="when">' + esc(F.dt(e.at)) + '</span></li>').join('');
-    const dd = S.model.dedupe.map((e) => '<li><span class="pill on">' + esc((SKY.AGENTS.find((a) => a.id === e.agent) || {}).name) + '</span><span>' + esc(e.text) + '</span></li>').join('');
-    return '<div><h1>Admin</h1><p class="lede">Health of the agent pipeline, processing errors, and every duplicate Skyline refused to create. A failed agent never takes the others down: the rest of the city keeps updating.</p></div>' +
-      '<div class="grid2"><div class="panel"><div class="phead ink"><span>AGENT HEALTH</span><span>LAST RUN ' + esc(F.time(S.now)) + '</span></div><div class="pbody"><table class="tbl"><thead><tr><th>AGENT</th><th>STATUS</th><th>PROCESSED</th><th>ERRORS</th><th>TIME</th></tr></thead><tbody>' + rows + '</tbody></table></div></div>' +
-      '<div class="panel"><div class="phead ink"><span>ERRORS AND CONNECTOR EVENTS</span><span>' + S.model.errors.length + ' OPEN</span></div><div class="pbody"><ul class="list">' + errs + '</ul>' +
-      (S.model.errors.length ? '' : '<button type="button" class="btn btn-sm" data-act="fault">Simulate an agent failure</button>') + '</div></div></div>' +
-      '<div class="panel"><div class="phead ink"><span>DUPLICATES PREVENTED</span><span>' + S.model.dedupe.length + '</span></div><div class="pbody"><ul class="list">' + (dd || '<li class="empty">None this run.</li>') + '</ul></div></div>';
+  function archivesPage() {
+    const ids = Object.keys(S.archived).sort((x, y) => t(S.archived[y].at) - t(S.archived[x].at));
+    const cards = ids.map((id) => {
+      const a = S.archived[id];
+      const c = S.model.clients[id];
+      return '<div class="panel ccard-static"><div class="phead teal"><span>' + esc(a.name.toUpperCase()) + '</span><span>✓ ARCHIVED ' + esc(F.dow(a.at).toUpperCase()) + '</span></div>' +
+        (c ? '<div class="mini"><div class="holder"><div class="plane">' + SKY.renderCity(c, { mini: true }) + '</div></div></div>' : '') +
+        '<div class="ccard-body"><div class="ccard-sub">' + esc(a.project || 'Implementation') + (a.goLive ? ' · go-live ' + F.day(a.goLive) : '') + ' · ' + plural(a.msgCount, 'message') + '</div>' +
+        '<div class="counts">' + a.ws.map((w) => '<span class="count">✓ ' + esc(w.name) + ' ' + w.pct + '%</span>').join('') + '</div>' +
+        '<div class="row"><button type="button" class="btn btn-sm" data-act="restore" data-id="' + esc(id) + '">Restore to the region</button></div></div></div>';
+    }).join('');
+    return '<div><h1>Archives</h1><p class="lede">Finished projects leave your region, so the skyline only shows live work. Each one keeps its city and everything Skyline learned, and you can bring it back any time.</p></div>' +
+      (cards ? '<div class="region">' + cards + '</div>' : '<div class="panel"><div class="pbody"><p class="empty">Nothing archived yet. When every building in a project reaches 100%, choose <b>Archive project</b> in the top-left panel or on its Region card.</p></div></div>');
   }
 
   // ---------------- modal ----------------
@@ -764,7 +765,7 @@
       item('reply', 'Dana replies to your follow-up', fu ? (replied ? 'Already replied.' : 'She offers a partial census by Tuesday. The fire becomes contained.') : 'Use Fix this issue on Employee data import first.', !fu || replied) +
       item('file', 'The census file arrives', arrived ? 'Already arrived.' : 'The fire goes out, blocked people can start, and the building grows.', arrived) +
       item('ff', 'Jump to the next business morning', 'Unanswered follow-ups relight their alarms. Late promises catch fire.') +
-      item(S.faults.opportunity ? 'retry' : 'fault', S.faults.opportunity ? 'Fix the Scout agent and retry' : 'Break the Scout agent', S.faults.opportunity ? 'Clears the fault and reprocesses the queued message.' : 'See a failure on the Admin page while the rest of the city keeps working.') +
+      item('golive', 'Northwind Foods goes live', S.messages.some((m) => m.id === 'l-nw') ? 'Already live.' : 'Omar signs off every workstream. The whole project hits 100% and can be archived.', S.messages.some((m) => m.id === 'l-nw')) +
       item('reset', 'Reset the demo', 'Back to Fri Oct 16, 15:40 with nothing sent.') + '</div></div>';
   }
   function advanceTo(m) { S.now = m.ts; recompute('New ' + (m.src === 'slack' ? 'Slack message in ' + m.where : m.src === 'meeting' ? 'meeting note' : 'email') + ' from ' + pname(m.from), m); }
@@ -814,13 +815,32 @@
       case 'reply': { const m = SKY.scripted.danaReply(S.now); S.messages.push(m); return advanceTo(m); }
       case 'file': { const m = SKY.scripted.censusFile(S.now); S.messages.push(m); return advanceTo(m); }
       case 'ff': S.now = nextBizMorning(S.now, 9, 5); return recompute('Clock moved to ' + F.dt(S.now));
-      case 'fault': S.faults.opportunity = true; return recompute('Scout agent hit an error');
-      case 'retry': delete S.faults.opportunity; return recompute('Admin retried the Scout agent');
+      case 'golive': { S.client = 'northwind'; S.view = 'city'; S.sel = null; const m = SKY.scripted.nwLive(S.now); S.messages.push(m); return advanceTo(m); }
+      case 'archive': return archive(el.dataset.id);
+      case 'restore': {
+        const id = el.dataset.id, a = S.archived[id];
+        delete S.archived[id];
+        S.client = id; S.view = 'city'; S.sel = null; S.detail = 'open';
+        recompute('You restored ' + a.name);
+        S.toast = { tone: 'ok', at: S.now, title: a.name + ' is back', body: 'The project is back in your region.' };
+        return render();
+      }
       case 'reset': if (S.live) clearInterval(S.live); S = fresh(); return recompute('Initial sync of Outlook and Slack');
       case 'access-flip': setPath(S.access, el.dataset.path, !getPath(S.access, el.dataset.path)); return recompute('Access rules changed');
       case 'bus': S.busScope = el.dataset.scope; return render();
     }
   });
+  // Archive a whole client project: its city leaves the region and goes to Archives.
+  function archive(cid) {
+    const c = S.model.clients[cid];
+    S.archived[cid] = { at: S.now, name: c.name, project: c.project, goLive: c.goLive, msgCount: c.msgCount, ws: c.ws.map((w) => ({ name: w.name, pct: w.pct })) };
+    S.sel = null;
+    const left = active().length;
+    if (S.client === cid) { S.client = active()[0]; S.view = left ? 'region' : 'archives'; }
+    recompute('You archived ' + c.name);
+    S.toast = { tone: 'ok', at: S.now, title: c.name + ' archived', body: (c.project ? c.project + ' moved' : 'The project moved') + ' to Archives. You can restore it from there.' };
+    render();
+  }
   function select(pick) {
     if (S.sel !== pick) S.editPct = null;
     S.sel = pick;

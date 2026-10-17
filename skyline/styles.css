@@ -157,6 +157,7 @@ a:hover { color: #4F8A8B; }
 .nav { position: absolute; right: 24px; top: 22px; display: flex; gap: 6px; align-items: center; z-index: 30; flex-wrap: wrap; justify-content: flex-end; }
 .nav-tab { white-space: nowrap; flex-shrink: 0; border: 2px solid var(--ink); background: var(--paper); border-radius: 3px; padding: 6px 12px; font-family: var(--cond); font-weight: 700; font-size: 14px; letter-spacing: .08em; cursor: pointer; min-height: 36px; }
 .nav-tab[aria-current="page"] { background: var(--ink); color: var(--paper); }
+.nav-tab .n.calm { background: var(--teal); }
 .nav-tab .n { display: inline-block; min-width: 18px; padding: 0 4px; margin-left: 4px; border-radius: 9px; background: var(--fire); color: #fff; font-size: 12px; letter-spacing: 0; }
 .clock { white-space: nowrap; flex-shrink: 0; border: 2px solid var(--ink); background: var(--cream); border-radius: 3px; padding: 6px 10px; font-family: var(--cond); font-weight: 700; font-size: 14px; letter-spacing: .06em; min-height: 36px; display: flex; align-items: center; gap: 6px; }
 .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fire); animation: pulse 1.2s ease-in-out infinite; }
@@ -348,3 +349,27 @@ textarea { min-height: 260px; line-height: 1.5; resize: vertical; }
   .detail.full { top: 8px; bottom: 8px; width: calc(100% - 16px); }
   .blocked li { grid-template-columns: 1fr; gap: 0; }
 }
+
+/* ---------- v3: duck facing, fountain, roof cables ---------- */
+/* swim loop (see @keyframes swim) moves right on screen from 0–12.5% and 62.5–100%, left in between */
+@keyframes face { 0%, 12.4% { transform: scaleX(1); } 12.5%, 62.4% { transform: scaleX(-1); } 62.5%, 100% { transform: scaleX(1); } }
+.face { display: block; animation-name: face; animation-timing-function: linear; animation-iteration-count: infinite; }
+@keyframes ring { 0% { transform: scale(.3); opacity: .9; } 100% { transform: scale(1); opacity: 0; } }
+.ring { position: absolute; left: -24px; top: -24px; width: 48px; height: 48px; border-radius: 50%; border: 1.5px solid rgba(255, 255, 255, .9); box-sizing: border-box; animation: ring 2.6s ease-out infinite; }
+.ring.r2 { animation-delay: -1.3s; }
+@keyframes flow { to { stroke-dashoffset: -7; } }
+.jet { fill: none; stroke: #E8F6FC; stroke-width: 2; stroke-linecap: round; stroke-dasharray: 3 4; animation: flow .5s linear infinite; }
+@keyframes drop { 0%, 100% { transform: translateY(0); opacity: 1; } 50% { transform: translateY(-4px); opacity: .5; } }
+.drop { fill: #E8F6FC; stroke: #5E9AB8; stroke-width: .8; animation: drop 1.2s ease-in-out infinite; }
+.drop.d2 { animation-delay: -.4s; }
+.drop.d3 { animation-delay: -.8s; }
+@keyframes march { from { background-position: 0 0, 0 50%; } to { background-position: 26px 0, 0 50%; } }
+.link3d { position: absolute; left: 0; top: -3.5px; height: 7px; transform-origin: 0 50%;
+  background: repeating-linear-gradient(90deg, #F0552E 0 16px, transparent 16px 26px), linear-gradient(#26303A, #26303A) 0 50% / 100% 2px no-repeat;
+  animation: march 1s linear infinite; }
+.anchor { display: block; width: 12px; height: 12px; border-radius: 50%; background: #F0552E; border: 2px solid #26303A; box-sizing: border-box; }
+.donebox { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; border: 2px solid var(--ink); border-radius: 3px; background: var(--contained); padding: 10px 12px; }
+.donebox b { display: block; font-size: 14px; }
+.donebox span { display: block; font-size: 12px; color: var(--muted); }
+.hud-done { margin-top: 10px; padding: 8px 10px; }
+.ccard .donebox { margin-top: 4px; }
