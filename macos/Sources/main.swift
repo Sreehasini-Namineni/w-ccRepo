@@ -6,7 +6,11 @@ import WebKit
 
 /// Owns the one WKWebView. It moves between the popover and the window, so the city
 /// keeps its state (selection, drafts, demo clock) when you switch.
-final class SkylineWeb: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
+final class SkylineWeb: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
+    /// The live server (server/, `npm start`). When it's running the app uses it, so LIVE mode works;
+    /// otherwise it falls back to the copy of the web app inside the bundle (DEMO only).
+    static let liveURL = URL(string: "http://localhost:8787/")!
+
     let webView: WKWebView
     var onFires: ((Int) -> Void)?
 
@@ -17,10 +21,25 @@ final class SkylineWeb: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         super.init()
         config.userContentController.add(self, name: "skyline")
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         load()
     }
 
     func load() {
+        var probe = URLRequest(url: SkylineWeb.liveURL.appendingPathComponent("api/snapshot"))
+        probe.timeoutInterval = 1.5
+        URLSession.shared.dataTask(with: probe) { [weak self] _, response, _ in
+            DispatchQueue.main.async {
+                if (response as? HTTPURLResponse)?.statusCode == 200 {
+                    self?.webView.load(URLRequest(url: SkylineWeb.liveURL))
+                } else {
+                    self?.loadBundled()
+                }
+            }
+        }.resume()
+    }
+
+    func loadBundled() {
         guard let dir = Bundle.main.resourceURL?.appendingPathComponent("web"),
               FileManager.default.fileExists(atPath: dir.appendingPathComponent("index.html").path) else {
             webView.loadHTMLString("<body style='font:15px system-ui;padding:24px'><h2>Skyline web files are missing</h2><p>Run <code>macos/build.sh</code> again.</p></body>", baseURL: nil)
@@ -34,14 +53,21 @@ final class SkylineWeb: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         if let body = message.body as? [String: Any], let fires = body["fires"] as? Int { onFires?(fires) }
     }
 
-    // Links that leave the app (mailto:, https:) open in the default handler, not in the panel.
+    // Links that leave the app (mailto:, Outlook, Slack) open in the default handler, not in the panel.
+    // Sign-in redirects (Microsoft login) stay inside so the server can finish connecting.
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        if action.navigationType == .linkActivated, let url = action.request.url, url.scheme != "file", url.scheme != "about" {
+        if action.navigationType == .linkActivated, let url = action.request.url, url.scheme != "file", url.scheme != "about", url.host != "localhost" {
             NSWorkspace.shared.open(url)
             decisionHandler(.cancel)
             return
         }
         decisionHandler(.allow)
+    }
+
+    // window.open (the web app's "Open in Outlook") goes to the default browser.
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if let url = action.request.url { NSWorkspace.shared.open(url) }
+        return nil
     }
 }
 

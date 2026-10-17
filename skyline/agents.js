@@ -103,7 +103,8 @@
         for (const p of [m.from].concat(m.to || [], m.cc || [])) { const c = orgOf(p); if (c) return { c, how: 'domain' }; }
         if (m.src === 'slack' && !m.dm) { const c = SKY.crm.find((x) => m.where.indexOf('#' + x.slack) === 0); if (c) return { c, how: 'channel' }; }
         const text = norm((m.subject || '') + ' ' + m.body);
-        const c = SKY.crm.find((x) => text.indexOf(norm(x.short)) >= 0);
+        // the domain word, the display name, or its first word ("Harbor & Pine" → "harbor")
+        const c = SKY.crm.find((x) => [x.short, x.name, x.name.split(/\s+/)[0]].some((a) => a && a.length >= 4 && text.indexOf(norm(a)) >= 0));
         return c ? { c, how: 'mention' } : null;
       };
       let unplaced = 0;
@@ -339,7 +340,9 @@
           }
           if (!f) return;
           out.stats.followup.processed++;
-          const reply = c.msgs.find((m) => t(m.ts) > t(f.sentAt) && m.from === f.to && m.sigs.some((s) => s.t === 'reply' && s.ref === i.id));
+          // A reply is a later message from the person you followed up with, about the same workstream
+          // (the demo's scripted replies also carry an explicit `reply` signal).
+          const reply = c.msgs.find((m) => t(m.ts) > t(f.sentAt) && m.from === f.to && m.sigs.some((s) => (s.t === 'reply' && s.ref === i.id) || (s.wsId && s.wsId === i.wsId)));
           i.followUp = f;
           if (reply) { i.status = 'contained'; i.reply = reply; i.note = first(f.to) + ' replied ' + F.dt(reply.ts) + '.'; return; }
           if (now < t(f.watchUntil)) {

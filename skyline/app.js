@@ -26,11 +26,37 @@
   };
   const addBizDays = (now, n) => { let d = new Date(now); while (n > 0) { d = new Date(nextBizMorning(d)); n--; } return d; };
 
+  // ---------------- data sources: the demo corpus or the live server ----------------
+  // Demo mode uses the mock corpus in data.js. Live mode swaps in a snapshot from
+  // server/ (real Outlook + Slack messages with Claude-extracted signals). The agents
+  // and the city run unchanged on either.
+  const DEMO = { messages: SKY.messages, people: SKY.people, crm: SKY.crm, internal: SKY.INTERNAL_DOMAIN, access: SKY.defaultAccess, shared: SKY.sharedChannels, events: SKY.connectorEvents };
+  const SERVED = location.protocol === 'http:' || location.protocol === 'https:';
+  let LIVE = null; // latest server snapshot
+  const ME = () => SKY.ME || 'you';
+  const prefs = { get: (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* private window */ } } };
+  function applyDemo() {
+    Object.assign(SKY, { messages: DEMO.messages, people: DEMO.people, crm: DEMO.crm, INTERNAL_DOMAIN: DEMO.internal, defaultAccess: DEMO.access, sharedChannels: DEMO.shared, connectorEvents: DEMO.events, ME: 'you' });
+    LIVE = null;
+  }
+  function applyLive(snap) {
+    LIVE = snap;
+    Object.assign(SKY, { messages: snap.messages, people: snap.people, crm: snap.crm, INTERNAL_DOMAIN: snap.internalDomain || 'internal.invalid', defaultAccess: snap.access, sharedChannels: snap.sharedChannels, connectorEvents: snap.events, ME: snap.meId || 'me' });
+    if (!SKY.people[SKY.ME]) SKY.people[SKY.ME] = { name: 'Me', email: snap.meId || '', role: 'You', you: true };
+  }
+  async function api(path, body) {
+    const r = await fetch(path, body === undefined ? { cache: 'no-store' } : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || 'The Skyline server returned ' + r.status);
+    return j;
+  }
+  const isLive = () => S && S.mode === 'live';
+
   // ---------------- state ----------------
   let S;
-  function fresh() {
+  function fresh(mode) {
     return {
-      now: SKY.DEMO_START, messages: SKY.messages.slice(), access: clone(SKY.defaultAccess),
+      mode: mode || 'demo', now: mode === 'live' ? F.iso(new Date()) : SKY.DEMO_START, messages: SKY.messages.slice(), access: clone(SKY.defaultAccess),
       corrections: [], followUps: {}, faults: {}, view: 'city', client: 'brightline', sel: null, profile: 'consultant',
       runs: [], model: null, toast: null, live: null, modal: null, demoOpen: false, busScope: 'client', citySig: null, detail: 'open', editPct: null, archived: {}
     };
@@ -192,8 +218,11 @@
     const nArch = Object.keys(S.archived).length;
     const tab = (v, label, n, calm) => '<button type="button" class="nav-tab" data-act="view" data-view="' + v + '"' + (S.view === v ? ' aria-current="page"' : '') + '>' + label + (n ? '<span class="n' + (calm ? ' calm' : '') + '">' + n + '</span>' : '') + '</button>';
     $('nav').innerHTML = tab('city', 'CITY') + tab('region', 'REGION', fires) + tab('sources', 'SOURCES') + tab('agents', 'AGENTS') + tab('archives', 'ARCHIVES', nArch, true) +
-      '<span class="clock" title="Demo clock">' + (S.live ? '<span class="live-dot" aria-hidden="true"></span>' : '') + esc(F.dt(S.now).toUpperCase()) + '</span>' +
-      '<button type="button" class="nav-tab demo-btn" data-act="demo" aria-expanded="' + S.demoOpen + '">DEMO ▾</button>';
+      '<span class="seg modeswitch" role="group" aria-label="Data source"><button type="button" data-act="mode" data-mode="demo" aria-pressed="' + !isLive() + '">DEMO</button><button type="button" data-act="mode" data-mode="live" aria-pressed="' + isLive() + '"' + (SERVED ? '' : ' title="Run the Skyline server to use live data"') + '>LIVE</button></span>' +
+      '<span class="clock" title="' + (isLive() ? 'Live data' : 'Demo clock') + '">' + (S.live || (isLive() && LIVE && LIVE.status.syncing) ? '<span class="live-dot" aria-hidden="true"></span>' : '') + esc((isLive() ? 'LIVE · ' + F.time(S.now) : F.dt(S.now)).toUpperCase()) + '</span>' +
+      (isLive()
+        ? '<button type="button" class="nav-tab demo-btn" data-act="sync"' + (LIVE && LIVE.status.syncing ? ' disabled' : '') + '>' + (LIVE && LIVE.status.syncing ? 'SYNCING…' : 'SYNC NOW') + '</button>'
+        : '<button type="button" class="nav-tab demo-btn" data-act="demo" aria-expanded="' + S.demoOpen + '">DEMO ▾</button>');
   }
 
   // ---------------- detail panel ----------------
@@ -383,7 +412,7 @@
   // ---------------- recommendations ----------------
   function suggestOwner(topic) {
     const p = Object.keys(SKY.people).find((id) => (SKY.people[id].skills || []).indexOf(topic) >= 0);
-    return p || 'you';
+    return p || ME();
   }
   function recommend(c, i) {
     const ws = wsById(c, i.wsId);
@@ -392,7 +421,7 @@
       const mgr = SKY.people[i.owner] && SKY.people[i.owner].manager;
       const dl = (i.downstream || [])[0];
       const pm = msg(((i.evidence || []).find((e) => e.role === 'The promise') || i.evidence[0]).msgId);
-      const other = i.jamId ? c.jams.find((j) => j.id === i.jamId).cars.find((e) => e.waiter !== 'you') : null;
+      const other = i.jamId ? c.jams.find((j) => j.id === i.jamId).cars.find((e) => e.waiter !== ME()) : null;
       const meet = { label: 'Schedule a meeting with ' + first(i.owner) + (other ? ' and ' + first(other.waiter) : ''), sub: '20 minutes, agenda and blockers filled in, ' + F.dt(meetingSlots()[0]) + ' suggested', kind: 'meeting' };
       const esc8 = mgr && { label: 'Escalate to ' + pname(mgr), sub: 'Copies ' + first(i.owner) + ' and lays out what’s blocked', kind: 'escalate' };
       if (i.status === 'relit') return {
@@ -404,7 +433,7 @@
       const w1 = i.waiters ? c.jams.find((j) => j.id === i.jamId).cars[0].waiter : null;
       return {
         text: 'Ask ' + first(i.owner) + ' for whatever part of the ' + lc(i.what) + ' is ready now, with a firm date for the rest.',
-        why: i.waiters ? plural(i.waiters, 'person is', 'people are') + ' queued behind it' + (dl ? ', and ' + dl.what + ' (' + F.day(dl.date) + ') is downstream' : '') + '. A partial delivery lets ' + (w1 === 'you' ? 'you' : first(w1)) + ' start now.' : 'It is ' + plural(i.daysLate, 'day') + ' overdue.',
+        why: i.waiters ? plural(i.waiters, 'person is', 'people are') + ' queued behind it' + (dl ? ', and ' + dl.what + ' (' + F.day(dl.date) + ') is downstream' : '') + '. A partial delivery lets ' + (w1 === ME() ? 'you' : first(w1)) + ' start now.' : 'It is ' + plural(i.daysLate, 'day') + ' overdue.',
         fix: true, tone: i.kind === 'fire' ? 'fire' : null,
         actions: [{ label: 'Email ' + first(i.owner) + ' a follow-up', sub: 'Drafted from what ' + first(i.owner) + ' said ' + saidWhere(pm).replace('your email', 'an email') + ', ready to edit', kind: 'nudge' }, meet, esc8,
           { label: 'Open ' + plural(i.evidence.length, 'source'), kind: 'sources' }]
@@ -413,8 +442,8 @@
     if (i.status === 'contained') return null;
     if (i.type === 'question') {
       const o = suggestOwner(i.topic);
-      return { text: o === 'you' ? 'Answer ' + first(i.asker) + ' yourself; nobody else owns this.' : 'Name ' + pname(o) + ' as the owner and answer ' + first(i.asker) + '.',
-        why: first(i.asker) + ' asked ' + F.dow(msg(i.evidence[0].msgId).ts) + ' and nobody has replied.' + (o !== 'you' ? ' ' + pname(o) + ' (' + SKY.people[o].role + ') is the natural owner.' : ''),
+      return { text: o === ME() ? 'Answer ' + first(i.asker) + ' yourself; nobody else owns this.' : 'Name ' + pname(o) + ' as the owner and answer ' + first(i.asker) + '.',
+        why: first(i.asker) + ' asked ' + F.dow(msg(i.evidence[0].msgId).ts) + ' and nobody has replied.' + (o !== ME() ? ' ' + pname(o) + ' (' + SKY.people[o].role + ') is the natural owner.' : ''),
         actions: [{ label: 'DRAFT THE ANSWER', kind: 'answer', primary: true }, { label: 'Schedule a meeting', kind: 'meeting' }] };
     }
     if (i.type === 'slip') return { text: 'Ask ' + first(i.owner) + ' for a new test date and put it on the plan.', why: 'A failed test with no new date usually becomes a missed deadline.', actions: [{ label: 'ASK FOR A NEW DATE', kind: 'slip', primary: true }] };
@@ -424,7 +453,7 @@
   }
   function recommendOpp(c, o) {
     const ae = Object.keys(SKY.people).find((id) => SKY.people[id].ae);
-    return { text: 'Hand this to ' + pname(ae) + ' while it’s warm.', why: first(o.owner) + ' raised it unprompted' + (o.ev.length > 1 ? ' and followed up (' + plural(o.ev.length, 'mention') + ')' : '') + '.', actions: [{ label: 'SEND TO THE ACCOUNT EXEC', kind: 'opp', primary: true, tone: 'gold' }] };
+    return { text: 'Hand this to ' + (ae ? pname(ae) : 'your account exec') + ' while it’s warm.', why: first(o.owner) + ' raised it unprompted' + (o.ev.length > 1 ? ' and followed up (' + plural(o.ev.length, 'mention') + ')' : '') + '.', actions: [{ label: 'SEND TO THE ACCOUNT EXEC', kind: 'opp', primary: true, tone: 'gold' }] };
   }
 
   // ---------------- meetings ----------------
@@ -440,8 +469,8 @@
     const j = i.cars ? i : i.jamId ? c.jams.find((x) => x.id === i.jamId) : null;
     const owner = i.type === 'question' ? i.asker : i.type === 'quiet' ? (i.owner && SKY.people[i.owner].email.indexOf(SKY.INTERNAL_DOMAIN) < 0 ? i.owner : c.people[0]) : i.owner;
     const people = [owner];
-    if (j) j.cars.forEach((e) => { if (e.waiter !== 'you' && people.indexOf(e.waiter) < 0 && people.length < 3) people.push(e.waiter); });
-    if (i.type === 'question') { const o = suggestOwner(i.topic); if (o !== 'you') people.push(o); }
+    if (j) j.cars.forEach((e) => { if (e.waiter !== ME() && people.indexOf(e.waiter) < 0 && people.length < 3) people.push(e.waiter); });
+    if (i.type === 'question') { const o = suggestOwner(i.topic); if (o !== ME()) people.push(o); }
     const what = i.what || (c.commits[i.rootKey] || {}).what || i.title;
     const ev0 = (i.evidence || [])[0];
     const lines = [];
@@ -453,14 +482,15 @@
       lines.push('', '1. ' + i.title, '2. Agree an owner and a date', '3. Next steps');
     }
     return { id, kind: 'meeting', to: owner, title: (ws ? ws.name + ': ' : '') + (i.type === 'commit' || i.cars ? 'unblock ' + lc(what) : lc(i.title)),
-      emails: people.concat(['you']).map((p) => SKY.people[p].email).join(', '), slots: meetingSlots(), slot: 0, minutes: 20, agenda: lines.join('\n') };
+      emails: people.concat([ME()]).map((p) => SKY.people[p].email).join(', '), slots: meetingSlots(), slot: 0, minutes: 20, agenda: lines.join('\n') };
   }
   function sendMeeting() {
     const d = S.modal.draft;
     const at = d.slots[d.slot];
+    if (isLive()) openInOutlook('meeting', { subject: d.title, body: d.agenda, to: d.emails, startdt: new Date(at).toISOString(), enddt: new Date(t(at) + d.minutes * 60000).toISOString() });
     const watchUntil = F.iso(new Date(t(at) + (d.minutes + 120) * 60000));
     S.followUps[d.id] = { kind: 'meeting', sentAt: S.now, to: d.to, meetingAt: at, subject: d.title, watchUntil };
-    S.messages.push({ id: 'out-' + (S.messages.length + 1), src: 'email', where: 'Sent', ts: S.now, from: 'you', to: [d.to], subject: 'Invitation: ' + d.title, body: d.agenda, thread: 'fu-' + d.id, signals: [] });
+    S.messages.push({ id: 'out-' + (S.messages.length + 1), src: 'email', where: 'Sent', ts: S.now, from: ME(), to: [d.to], subject: 'Invitation: ' + d.title, body: d.agenda, thread: 'fu-' + d.id, signals: [] });
     S.modal = null;
     const ev = recompute('You booked “' + d.title + '”').filter((e) => e.client === S.client);
     S.toast = { tone: 'ok', at: S.now, client: S.client, sel: ev[0] && ev[0].sel, title: ev[0] ? ev[0].title : 'Meeting booked',
@@ -482,7 +512,7 @@
     let dlUsed = false;
     const parts = j.cars.map((e, k) => {
       const when = dl && lc(dl.what) === lc(e.what) ? (dlUsed = true, ' (' + F.day(dl.date) + ')') : '';
-      if (e.waiter === 'you') return 'I can’t start ' + lc(e.what) + when + ' until then';
+      if (e.waiter === ME()) return 'I can’t start ' + lc(e.what) + when + ' until then';
       return k === 0 ? first(e.waiter) + ' is waiting on it to start the ' + lc(e.what) + when : first(e.waiter) + '’s ' + lc(e.what) + when + ' is queued behind that';
     });
     if (dl && !dlUsed) parts.push(dl.what + ' (' + F.day(dl.date) + ') depends on all of it');
@@ -491,7 +521,7 @@
   }
   function buildDraft(kind, id, tone) {
     const { c, i } = findItem(id);
-    const me = SKY.people.you;
+    const me = SKY.people[ME()] || { name: 'Me' };
     const sign = '\n\nThanks,\n' + me.name.split(' ')[0];
     const toneLine = tone === 'firm' ? '\n\nTo keep the ' + (c.goLive ? F.day(c.goLive) + ' go-live' : 'plan') + ' on track, I need an answer by ' + F.dow(addBizDays(S.now, 1)) + '.'
       : tone === 'friendly' ? '\n\nHappy to jump on a quick call if that’s easier. I know how much is on your plate.' : '';
@@ -523,9 +553,9 @@
     } else if (kind === 'answer') {
       const o = suggestOwner(i.topic);
       const m = msg(ev0.msgId);
-      to = i.asker; if (o !== 'you') cc = [o];
+      to = i.asker; if (o !== ME()) cc = [o];
       subject = 'Re: ' + (m.subject || i.text);
-      body = 'Hi ' + first(to) + ',\n\nSorry for the slow reply on “' + ev0.quote + '”' + qend(ev0.quote) + ' ' + (o === 'you' ? 'I’m confirming the details and will come back to you by ' + F.dow(addBizDays(S.now, 1)) + '.' : pname(o) + ' will own this and will reach out this week.') + toneLine + sign;
+      body = 'Hi ' + first(to) + ',\n\nSorry for the slow reply on “' + ev0.quote + '”' + qend(ev0.quote) + ' ' + (o === ME() ? 'I’m confirming the details and will come back to you by ' + F.dow(addBizDays(S.now, 1)) + '.' : pname(o) + ' will own this and will reach out this week.') + toneLine + sign;
     } else if (kind === 'slip') {
       to = i.owner;
       subject = 'New date for the re-test?';
@@ -541,22 +571,29 @@
       subject = ws.name + ': let’s pick a date';
       body = 'Hi ' + first(to) + ',\n\nPicking ' + lc(ws.name) + ' back up.' + (ev0 && msg(ev0.msgId).from === to ? ' ' + saidWhere(msg(ev0.msgId)).replace(/^./, (x) => x.toUpperCase()) + ' you said “' + ev0.quote + '”' : '') + ' With go-live on ' + F.dow(c.goLive) + ', could we hold the session on ' + F.dow(d1) + ' or ' + F.dow(d2) + '?' + toneLine + sign;
     } else if (kind === 'opp') {
-      to = Object.keys(SKY.people).find((x) => SKY.people[x].ae);
+      to = Object.keys(SKY.people).find((x) => SKY.people[x].ae) || null;
       const o = i;
       subject = 'Opportunity at ' + c.name + ': ' + lc(o.title);
-      body = 'Hi ' + first(to) + ',\n\n' + pname(o.owner) + ' (' + SKY.people[o.owner].role + ') at ' + c.name + ' asked about ' + lc(o.title) + ':\n\n' +
+      body = 'Hi ' + (to ? first(to) : 'there') + ',\n\n' + pname(o.owner) + ' (' + SKY.people[o.owner].role + ') at ' + c.name + ' asked about ' + lc(o.title) + ':\n\n' +
         o.ev.map((e) => '“' + e.quote + '” (' + SKY.srcLabel(msg(e.msgId)) + ')').join('\n') +
         '\n\nThey’re mid-rollout' + (c.project ? ' (' + lc(c.project) + ', go-live ' + F.day(c.goLive) + ')' : '') + ', so the timing is good for a conversation. Want me to set up an intro?\n\n' + me.name.split(' ')[0];
     }
     return { kind, id, tone: tone || 'neutral', to, cc, toEmail: to ? SKY.people[to].email : '', ccEmail: cc.map((x) => SKY.people[x].email).join(', '), subject, body, ctx: [...new Set(ctx)] };
   }
 
+  // Live mode never sends on its own: it opens Outlook on the web with the draft or invite filled in.
+  function openInOutlook(kind, fields) {
+    const base = (LIVE && LIVE.outlookWeb) || 'https://outlook.office.com';
+    const q = new URLSearchParams(fields);
+    window.open(base + (kind === 'meeting' ? '/calendar/deeplink/compose?' : '/mail/deeplink/compose?') + q.toString(), '_blank', 'noopener');
+  }
   function sendDraft() {
     const d = S.modal.draft;
+    if (isLive()) openInOutlook('mail', { to: d.toEmail, cc: d.ccEmail, subject: d.subject, body: d.body });
     const toId = Object.keys(SKY.people).find((id) => SKY.people[id].email === d.toEmail.trim()) || null;
     const watchUntil = nextBizMorning(S.now);
     S.followUps[d.id] = { sentAt: S.now, to: toId, subject: d.subject, kind: d.kind, watchUntil };
-    S.messages.push({ id: 'out-' + (S.messages.length + 1), src: 'email', where: 'Sent', ts: S.now, from: 'you', to: toId ? [toId] : [], subject: d.subject, body: d.body, thread: 'fu-' + d.id, signals: [] });
+    S.messages.push({ id: 'out-' + (S.messages.length + 1), src: 'email', where: 'Sent', ts: S.now, from: ME(), to: toId ? [toId] : [], subject: d.subject, body: d.body, thread: 'fu-' + d.id, signals: [] });
     S.modal = null;
     const ev = recompute('You sent “' + d.subject + '”').filter((e) => e.client === S.client);
     const internal = toId && SKY.people[toId].email.indexOf(SKY.INTERNAL_DOMAIN) >= 0;
@@ -594,7 +631,54 @@
   function getPath(o, p) { return p.split('.').reduce((x, k) => x[k], o); }
   function setPath(o, p, v) { const ks = p.split('.'); const last = ks.pop(); ks.reduce((x, k) => x[k], o)[last] = v; }
 
+  function discoveredHtml() {
+    return S.model.order.map((id) => {
+      const c = S.model.clients[id];
+      return '<div class="panel"><div class="phead teal"><span>' + esc(c.name.toUpperCase()) + '</span><span>' + esc(c.domain) + '</span></div><div class="pbody">' +
+        '<p class="note">Discovered from ' + plural(c.msgCount, 'message') + ': ' + Object.keys(c.how).map((k) => c.how[k] + ' by ' + ({ domain: 'email domain', channel: 'Slack channel name', mention: 'name mention' }[k])).join(', ') + '.' + (c.project ? ' Project “' + esc(c.project) + '”' + (c.goLive ? ', go-live ' + F.day(c.goLive) : '') + '.' : '') + '</p>' +
+        '<div class="facts-k">CLIENT CONTACTS</div><div class="people">' + c.people.map((p) => '<span class="person"><b>' + who(p) + '</b> · ' + esc(SKY.people[p].role) + '</span>').join('') + '</div>' +
+        '<div class="facts-k">TEAMMATES</div><div class="people">' + c.internal.map((p) => '<span class="person"><b>' + who(p) + '</b> · ' + esc(SKY.people[p].role) + '</span>').join('') + '</div>' +
+        '<div class="facts-k">WORKSTREAMS</div><div class="people">' + c.ws.map((w) => '<span class="person"><b>' + esc(w.name) + '</b>' + (w.aliases.length ? ' · also “' + w.aliases.map(esc).join('”, “') + '”' : '') + '</span>').join('') + '</div></div></div>';
+    }).join('');
+  }
+
+  function liveSourcesPage() {
+    if (!LIVE) return '<div><h1>Sources</h1><p class="lede">Loading live data…</p></div>';
+    const st = LIVE.status, A = LIVE.access;
+    const count = (f) => SKY.messages.filter(f).length;
+    const tog = (kind, key, on, label, n, sub) => '<label class="tog"><input type="checkbox" data-act="live-access" data-kind="' + kind + '" data-key="' + esc(key) + '"' + (on ? ' checked' : '') + '><span>' + esc(label) + (sub ? '<span class="sub">' + esc(sub) + '</span>' : '') + '</span>' + (n === null ? '' : '<span class="cnt">' + plural(n, 'message') + '</span>') + '</label>';
+    const pill = (on, yes, no) => '<span class="pill ' + (on ? 'on' : 'off') + '">' + (on ? yes : no) + '</span>';
+    const outlook = '<div class="panel"><div class="phead teal"><span>OUTLOOK</span><span>' + esc(st.outlook.account || 'MICROSOFT 365') + '</span></div><div class="pbody">' +
+      (!st.outlook.configured
+        ? '<div class="conn">' + pill(false, '', 'NOT SET UP') + '</div><p class="note">Register an app in Microsoft Entra and put its client ID in <code>server/.env</code> as <code>MS_CLIENT_ID</code>, then restart the server. Steps are in server/README.md.</p>'
+        : st.outlook.connected
+          ? '<div class="conn">' + pill(true, 'CONNECTED', '') + '<button type="button" class="btn btn-sm" data-act="live-disconnect" data-src="outlook">Disconnect</button></div>' +
+            '<div>' + st.folders.map((f) => tog('folder', f, A.outlook.folders[f] !== false && A.outlook.folders[f] !== undefined, f, count((m) => m.src === 'email' && m.where === f), /^(inbox|sent items)$/i.test(f) ? '' : 'Off unless you turn it on')).join('') + '</div>' +
+            '<p class="note">Read-only (Mail.Read). Turning a folder off deletes what Skyline stored from it.</p>'
+          : '<div class="conn">' + pill(false, '', 'NOT CONNECTED') + '<a class="btn btn-p btn-sm" href="/auth/outlook/start">CONNECT OUTLOOK</a></div><p class="note">You’ll sign in with Microsoft. Skyline asks only to read your mail.</p>') + '</div></div>';
+    const slack = '<div class="panel"><div class="phead teal"><span>SLACK</span><span>' + esc(st.slack.team || 'WORKSPACE') + '</span></div><div class="pbody">' +
+      (st.slack.connected
+        ? '<div class="conn">' + pill(true, 'CONNECTED', '') + (st.slack.fromEnv ? '<span class="note">Token from server/.env</span>' : '<button type="button" class="btn btn-sm" data-act="live-disconnect" data-src="slack">Disconnect</button>') + '</div>' +
+          '<div>' + st.channels.map((ch) => tog('channel', ch, A.slack.channels[ch] !== false, ch, count((m) => m.src === 'slack' && m.where === ch), SKY.sharedChannels[ch] ? 'Shared with the client' : '')).join('') +
+          tog('dms', 'dms', A.slack.dms, 'Direct messages', count((m) => m.src === 'slack' && m.dm), st.dmCount + ' conversations · off by default') + '</div>' +
+          '<p class="note">Skyline reads channels its token is a member of. Invite the app to a channel to add it.</p>'
+        : '<div class="conn">' + pill(false, '', 'NOT CONNECTED') + '</div><form class="slackform" data-form="slack"><input name="token" type="password" autocomplete="off" placeholder="xoxp-… or xoxb-… token" aria-label="Slack token"><button type="submit" class="btn btn-p btn-sm">CONNECT SLACK</button></form>' +
+          '<p class="note">Paste a user or bot token from your Slack app (scopes are listed in server/README.md). It stays on this computer in server/data.</p>') + '</div></div>';
+    const u = st.usage;
+    const claude = '<div class="panel"><div class="phead"><span>CLAUDE · SIGNAL EXTRACTION</span><span class="pill ' + (st.pending ? 'warn' : 'on') + '">' + (st.pending ? st.pending + ' TO READ' : 'UP TO DATE') + '</span></div><div class="pbody">' +
+      '<p class="note">Only messages tied to a client are sent to Claude (claude-opus-5-5), after redaction. ' + plural(u.calls, 'request') + ' so far · ' + (u.input + u.output).toLocaleString() + ' tokens · ' + u.cacheRead.toLocaleString() + ' served from cache.</p>' +
+      '<label class="tog"><input type="checkbox" data-act="live-access" data-kind="redact" data-key="redact"' + (A.redact ? ' checked' : '') + '><span>Redact SSNs and account numbers before anything is stored or sent<span class="sub">Applied on the server, before Claude or the agents see the text.</span></span></label></div></div>';
+    const sync = '<div class="panel"><div class="phead"><span>CONTINUOUS PROCESSING</span><span class="pill ' + (st.syncing ? 'warn' : 'on') + '">' + (st.syncing ? 'SYNCING' : 'IDLE') + '</span></div><div class="pbody">' +
+      '<p class="note">' + (st.lastSync ? 'Last sync ' + esc(F.dt(st.lastSync)) + '.' : 'Not synced yet.') + ' The server syncs every few minutes and this page refreshes on its own.</p>' +
+      '<div class="row"><button type="button" class="btn btn-p" data-act="sync"' + (st.syncing ? ' disabled' : '') + '>' + (st.syncing ? 'SYNCING…' : 'SYNC NOW') + '</button></div>' +
+      '<div class="facts-k">RECENT EVENTS</div><ul class="list">' + (LIVE.events.slice(0, 8).map((e) => '<li><span class="pill ' + ({ ok: 'on', warn: 'warn', bad: 'bad' }[e.level] || 'on') + '">' + esc(e.source.toUpperCase()) + '</span><span>' + esc(e.text) + '</span><span class="when">' + esc(F.dt(e.at)) + '</span></li>').join('') || '<li class="empty">Nothing yet.</li>') + '</ul></div></div>';
+    const disc = discoveredHtml();
+    return '<div><h1>Sources · live</h1><p class="lede">Your real Outlook and Slack. The Skyline server on this computer reads new messages, finds clients by their email domains, and has Claude pull out promises, blockers, questions and requests. Switch to DEMO at the top any time.</p></div>' +
+      '<div class="grid2">' + outlook + slack + claude + sync + '</div><h2>Discovered automatically</h2>' + (disc ? '<div class="grid2">' + disc + '</div>' : '<div class="panel"><div class="pbody"><p class="empty">No clients yet. Skyline treats an outside email domain as a client once you have two or more messages with it. Connect a source and sync.</p></div></div>');
+  }
+
   function sourcesPage() {
+    if (isLive()) return liveSourcesPage();
     const A = S.access;
     const recv = S.messages.filter((m) => t(m.ts) <= t(S.now));
     const count = (f) => recv.filter(f).length;
@@ -613,14 +697,7 @@
     const live = '<div class="panel"><div class="phead"><span>CONTINUOUS PROCESSING</span><span class="pill ' + (S.live ? 'warn' : 'on') + '" style="color:var(--ink)">' + (S.live ? 'STREAMING' : 'UP TO DATE') + '</span></div><div class="pbody">' +
       '<p class="note">Last checked ' + esc(F.dt(S.now)) + '. ' + S.model.stats.intake.processed + ' messages processed. ' + plural(S.messages.filter((m) => t(m.ts) > t(S.now)).length, 'message') + ' queued in the demo feed.</p>' +
       '<div class="row"><button type="button" class="btn btn-p" data-act="live">' + (S.live ? 'PAUSE LIVE FEED' : 'PLAY LIVE FEED') + '</button></div></div></div>';
-    const disc = S.model.order.map((id) => {
-      const c = S.model.clients[id];
-      return '<div class="panel"><div class="phead teal"><span>' + esc(c.name.toUpperCase()) + '</span><span>' + esc(c.domain) + '</span></div><div class="pbody">' +
-        '<p class="note">Discovered from ' + plural(c.msgCount, 'message') + ': ' + Object.keys(c.how).map((k) => c.how[k] + ' by ' + ({ domain: 'email domain', channel: 'Slack channel name', mention: 'name mention' }[k])).join(', ') + '.' + (c.project ? ' Project “' + esc(c.project) + '”, go-live ' + F.day(c.goLive) + '.' : '') + '</p>' +
-        '<div class="facts-k">CLIENT CONTACTS</div><div class="people">' + c.people.map((p) => '<span class="person"><b>' + who(p) + '</b> · ' + esc(SKY.people[p].role) + '</span>').join('') + '</div>' +
-        '<div class="facts-k">TEAMMATES</div><div class="people">' + c.internal.map((p) => '<span class="person"><b>' + who(p) + '</b> · ' + esc(SKY.people[p].role) + '</span>').join('') + '</div>' +
-        '<div class="facts-k">WORKSTREAMS</div><div class="people">' + c.ws.map((w) => '<span class="person"><b>' + esc(w.name) + '</b>' + (w.aliases.length ? ' · also “' + w.aliases.map(esc).join('”, “') + '”' : '') + '</span>').join('') + '</div></div></div>';
-    }).join('');
+    const disc = discoveredHtml();
     return '<div><h1>Sources</h1><p class="lede">Connect Outlook and Slack once. Skyline reads new messages continuously, finds the clients, people and workstreams by itself, and only touches what you allow here. Changing a switch re-runs every agent, and the city updates.</p></div>' +
       '<div class="grid2">' + outlook + slack + privacy + live + '</div><h2>Discovered automatically</h2><div class="grid2">' + disc + '</div>';
   }
@@ -673,8 +750,8 @@
         '<textarea aria-label="Email body" data-draft="body">' + esc(d.body) + '</textarea>' +
         '<div class="ctx"><span>Context used:</span>' + d.ctx.map((x) => '<span class="chip">' + esc(x) + '</span>').join('') + '</div>' +
         '<div class="row"><span class="note">Tone</span><span class="seg" role="group" aria-label="Tone">' + ['friendly', 'neutral', 'firm'].map((x) => '<button type="button" data-act="tone" data-tone="' + x + '" aria-pressed="' + (d.tone === x) + '">' + x.toUpperCase() + '</button>').join('') + '</span></div>' +
-        '<div class="row"><button type="button" class="btn btn-p' + (d.kind === 'nudge' && findItem(d.id).i.kind === 'fire' ? ' btn-fire' : '') + '" data-act="send">SEND</button><button type="button" class="btn" data-act="close">Cancel</button></div>' +
-        '<p class="note">Nothing is sent until you press Send. In this demo Send records the email in your Sent folder and starts the reply watch; no real mail leaves the browser.</p>';
+        '<div class="row"><button type="button" class="btn btn-p' + (d.kind === 'nudge' && findItem(d.id).i.kind === 'fire' ? ' btn-fire' : '') + '" data-act="send">' + (isLive() ? 'OPEN IN OUTLOOK' : 'SEND') + '</button><button type="button" class="btn" data-act="close">Cancel</button></div>' +
+        '<p class="note">' + (isLive() ? 'Opens Outlook with this email filled in. Nothing goes out until you press Send there. Skyline starts watching for a reply now.' : 'Nothing is sent until you press Send. In this demo Send records the email in your Sent folder and starts the reply watch; no real mail leaves the browser.') + '</p>';
     } else if (md.type === 'meeting') {
       const d = md.draft;
       title = 'MEETING INVITE · REVIEW BEFORE SENDING';
@@ -683,8 +760,8 @@
         '<div class="field"><label>When</label><div class="slots" role="radiogroup" aria-label="Suggested times">' + d.slots.map((x, k) => '<button type="button" class="slot" role="radio" aria-checked="' + (d.slot === k) + '" data-act="slot" data-k="' + k + '">' + esc(F.dt(x)) + '</button>').join('') + '</div></div>' +
         '<div class="field"><label for="m-len">Length</label><select id="m-len" data-draft="minutes">' + [15, 20, 30, 45].map((m) => '<option value="' + m + '"' + (+d.minutes === m ? ' selected' : '') + '>' + m + ' minutes</option>').join('') + '</select></div>' +
         '<textarea aria-label="Agenda" data-draft="agenda">' + esc(d.agenda) + '</textarea>' +
-        '<div class="row"><button type="button" class="btn btn-p" data-act="send-meeting">SEND INVITE</button><button type="button" class="btn" data-act="close">Cancel</button></div>' +
-        '<p class="note">Suggested times are the next working slots. A Teams link is added when the invite goes out. In this demo the invite stays in the browser.</p>';
+        '<div class="row"><button type="button" class="btn btn-p" data-act="send-meeting">' + (isLive() ? 'OPEN IN OUTLOOK' : 'SEND INVITE') + '</button><button type="button" class="btn" data-act="close">Cancel</button></div>' +
+        '<p class="note">' + (isLive() ? 'Opens a new Outlook meeting with this filled in. Nothing goes out until you press Send there.' : 'Suggested times are the next working slots. A Teams link is added when the invite goes out. In this demo the invite stays in the browser.') + '</p>';
     } else if (md.type === 'correct') {
       title = 'CORRECT THIS INSIGHT';
       body = '<form data-form="correct" class="cform-wrap">' + correctForm(md.id) + '</form>';
@@ -704,7 +781,7 @@
     }
     if (m.src === 'meeting') text = text.split('\n').map((l) => l.replace(/^([A-Z][a-z]+):/, '<span class="spk">$1:</span>')).join('\n');
     const whoList = (ids) => (ids || []).map((p) => who(p)).join(', ');
-    return '<div class="msg-card"><div class="msg-src"><span>' + esc(kind) + '</span>' + (m.redacted ? '<span class="pill warn">REDACTED BY SKYLINE</span>' : '') + '<a href="#" data-act="noop">Open in ' + (m.src === 'slack' ? 'Slack' : 'Outlook') + ' ↗</a></div>' +
+    return '<div class="msg-card"><div class="msg-src"><span>' + esc(kind) + '</span>' + (m.redacted ? '<span class="pill warn">REDACTED BY SKYLINE</span>' : '') + (m.link ? '<a href="' + esc(m.link) + '" target="_blank" rel="noopener">' : '<a href="#" data-act="noop">') + 'Open in ' + (m.src === 'slack' ? 'Slack' : 'Outlook') + ' ↗</a></div>' +
       '<dl class="msg-meta"><dt>From</dt><dd><b>' + esc(pname(m.from)) + '</b> &lt;' + esc(SKY.people[m.from].email) + '&gt;</dd>' +
       (m.to && m.to.length ? '<dt>' + (m.src === 'meeting' ? 'With' : 'To') + '</dt><dd>' + whoList(m.to) + (m.cc ? ' · cc ' + whoList(m.cc) : '') + '</dd>' : '') +
       '<dt>When</dt><dd>' + esc(F.dt(m.ts)) + (m.src === 'meeting' ? ' · at ' + esc(m.offset) + ' in the recording' : '') + '</dd>' +
@@ -829,6 +906,9 @@
         return render();
       }
       case 'reset': if (S.live) clearInterval(S.live); S = fresh(); return recompute('Initial sync of Outlook and Slack');
+      case 'mode': return setMode(el.dataset.mode);
+      case 'sync': return liveCall(api('/api/sync', {}), 'Synced Outlook and Slack');
+      case 'live-disconnect': return liveCall(api('/api/' + el.dataset.src + '/disconnect', {}), (el.dataset.src === 'slack' ? 'Slack' : 'Outlook') + ' disconnected');
       case 'access-flip': setPath(S.access, el.dataset.path, !getPath(S.access, el.dataset.path)); return recompute('Access rules changed');
       case 'bus': S.busScope = el.dataset.scope; return render();
     }
@@ -866,6 +946,7 @@
     const f = ev.target;
     if (f.dataset.form === 'pct') { ev.preventDefault(); savePct(f); }
     if (f.dataset.form === 'correct') { ev.preventDefault(); saveCorrection(); }
+    if (f.dataset.form === 'slack') { ev.preventDefault(); liveCall(api('/api/slack/connect', { token: f.token.value }), 'Slack connected'); }
   });
   // hover / focus card for people: name, role, email
   const tip = () => $('tip');
@@ -883,6 +964,11 @@
   document.addEventListener('change', (ev) => {
     const el = ev.target;
     if (el.dataset.act === 'profile-select') { S.profile = el.value; return render(); }
+    if (el.dataset.act === 'live-access') {
+      const k = el.dataset.kind, key = el.dataset.key, on = el.checked;
+      const access = k === 'folder' ? { outlook: { folders: { [key]: on } } } : k === 'channel' ? { slack: { channels: { [key]: on } } } : k === 'dms' ? { slack: { dms: on } } : { redact: on };
+      return liveCall(api('/api/settings', { access }), 'Access rules changed: ' + (k === 'redact' ? 'redaction' : key) + ' ' + (on ? 'on' : 'off'));
+    }
     if (el.dataset.act === 'access') { setPath(S.access, el.dataset.path, el.checked); recompute('Access rules changed: ' + el.dataset.path.split('.').pop() + ' ' + (el.checked ? 'on' : 'off')); }
   });
   document.addEventListener('input', (ev) => {
@@ -895,7 +981,52 @@
   });
   window.addEventListener('resize', () => { if (S.view === 'city') fit(); });
 
+  function refreshLive(snap, trigger) {
+    applyLive(snap);
+    S.messages = SKY.messages.concat(S.messages.filter((m) => m.id.indexOf('out-') === 0)); // keep follow-ups you started here
+    S.access = clone(SKY.defaultAccess);
+    S.now = F.iso(new Date());
+    recompute(trigger);
+  }
+  function liveCall(promise, trigger) {
+    if (LIVE) LIVE.status.syncing = true;
+    render();
+    return promise.then((snap) => refreshLive(snap, trigger)).catch((e) => { S.toast = { tone: 'fire', at: S.now, title: 'Live data problem', body: e.message }; if (LIVE) LIVE.status.syncing = false; render(); });
+  }
+  let poll = null;
+  async function setMode(mode) {
+    if (mode === 'live') {
+      if (!SERVED) {
+        S.toast = { tone: 'fire', at: S.now, title: 'Live mode needs the Skyline server', body: 'In a terminal: cd server && npm start, then open http://localhost:8787. The demo keeps working here.' };
+        return render();
+      }
+      try { applyLive(await api('/api/snapshot')); } catch (e) {
+        S.toast = { tone: 'fire', at: S.now, title: 'Couldn’t reach the Skyline server', body: e.message };
+        return render();
+      }
+    } else applyDemo();
+    prefs.set('skyline-mode', mode);
+    if (S && S.live) clearInterval(S.live);
+    S = fresh(mode);
+    if (mode === 'live' && location.hash === '#sources') S.view = 'sources';
+    recompute(mode === 'live' ? 'Loaded live data from Outlook and Slack' : 'Initial sync of Outlook and Slack');
+    clearInterval(poll);
+    if (mode === 'live') {
+      let last = JSON.stringify([LIVE.status.lastSync, LIVE.messages.length, LIVE.status.syncing, LIVE.status.pending]);
+      poll = setInterval(async () => {
+        try {
+          const snap = await api('/api/snapshot');
+          const sig = JSON.stringify([snap.status.lastSync, snap.messages.length, snap.status.syncing, snap.status.pending]);
+          const changed = sig !== last;
+          if (changed || t(F.iso(new Date())) - t(S.now) > 5 * 60000) { last = sig; refreshLive(snap, changed ? 'New messages from Outlook and Slack' : 'Checked for new messages'); }
+        } catch (e) { /* server restarting; try again next tick */ }
+      }, 20000);
+    }
+  }
+
   S = fresh();
   recompute('Initial sync of Outlook and Slack');
+  const wanted = new URLSearchParams(location.search).get('mode') || prefs.get('skyline-mode');
+  if (wanted === 'live' && SERVED) setMode('live');
   SKY.debug = () => S;
 })();

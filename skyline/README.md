@@ -8,7 +8,9 @@ This is a working front-end prototype. The visual design is ported from `../ADP 
 
 Open `index.html` in a browser. There is no build step and no server, and plain `<script>` tags work from `file://`. Fonts load from Google Fonts; without a network connection the system fonts are used instead.
 
-Use **DEMO ▾** (top right) to drive the story:
+**Demo or live.** The **DEMO / LIVE** switch at the top chooses the data. Demo is the mock corpus below and works anywhere. Live reads your real Outlook and Slack through the local server in `../server`: run `npm start` there and open http://localhost:8787. See [server/README.md](../server/README.md) for setup.
+
+In demo mode, use **DEMO ▾** (top right) to drive the story:
 
 1. Click the burning **Employee data import** building, then **Fix this issue**. Choose to email Dana, schedule a meeting, or escalate. Review the draft or invite, then send it. The fire becomes *contained*.
 2. **Jump to the next business morning**. Nobody replied, so the alarm relights.
@@ -26,9 +28,9 @@ Use **DEMO ▾** (top right) to drive the story:
 | `city.js` | Isometric CSS-3D renderer (full city and mini skylines) |
 | `app.js` | Views, evidence viewer, draft editor, corrections, demo clock |
 
-**What is mocked:** the connectors and the extraction model. Each message carries `signals` (commitment, waiting-on, question, opportunity, progress, and so on) that stand in for what an LLM extraction step would return. Everything after that is real logic: client and workstream discovery, alias merging, dependency chains, fire-or-smoke decisions, quote verification, follow-up tracking and relighting.
+**What is mocked (demo mode only):** the connectors and the extraction model. Each message carries `signals` (commitment, waiting-on, question, opportunity, progress, and so on) that stand in for what an LLM extraction step would return. Everything after that is real logic: client and workstream discovery, alias merging, dependency chains, fire-or-smoke decisions, quote verification, follow-up tracking and relighting.
 
-To go live, replace `SKY.messages` with Microsoft Graph and Slack API reads, and generate `signals` with a model call per message. `runPipeline` does not need to change.
+Live mode does exactly that. The server reads Microsoft Graph and Slack, and Claude generates `signals` for each client message, so `runPipeline` runs unchanged on either source.
 
 ### The agents
 

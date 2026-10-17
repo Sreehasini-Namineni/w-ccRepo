@@ -18,7 +18,8 @@ To keep it in your menu bar, drag `macos/build/Skyline.app` into `/Applications`
 - **Click** the building icon to open or close the panel. Clicking anywhere else closes it.
 - The number next to the icon is how many fires are burning across your region.
 - **Right-click** the icon for **Open in Window** (a full-size, resizable window), **Reload Skyline** and **Quit**. The city keeps its state when you move between the panel and the window.
-- Email links open in your mail app.
+- Email links open in your mail app. "Open in Outlook" opens your browser.
+- If the live server (`server/`, `npm start`) is running when the app starts or reloads, the app uses it, so the **LIVE** switch works. Otherwise it shows the built-in demo.
 
 ## Switching back
 

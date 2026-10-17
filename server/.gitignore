@@ -1,0 +1,4 @@
+node_modules/
+.env
+# tokens, synced messages and extracted signals stay on this machine
+data/
