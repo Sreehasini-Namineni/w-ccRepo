@@ -186,6 +186,9 @@
 
   function renderNav() {
     const fires = active().reduce((n, id) => n + S.model.clients[id].counts.fire, 0);
+    // Inside the macOS menu bar app, report the fire count for the menu bar badge.
+    const native = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.skyline;
+    if (native) native.postMessage({ fires });
     const nArch = Object.keys(S.archived).length;
     const tab = (v, label, n, calm) => '<button type="button" class="nav-tab" data-act="view" data-view="' + v + '"' + (S.view === v ? ' aria-current="page"' : '') + '>' + label + (n ? '<span class="n' + (calm ? ' calm' : '') + '">' + n + '</span>' : '') + '</button>';
     $('nav').innerHTML = tab('city', 'CITY') + tab('region', 'REGION', fires) + tab('sources', 'SOURCES') + tab('agents', 'AGENTS') + tab('archives', 'ARCHIVES', nArch, true) +
