@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Skyline</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Condensed:wght@600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <div class="stage" id="stage"><div class="holder" id="holder"><div class="plane" id="plane"></div></div></div>
+    <div class="hud" id="hud"></div>
+    <div class="legend panel" id="legend">
+      <span>Height = progress</span><span>Lit windows = recent activity</span>
+      <span style="color: var(--fire-ink);">Fire = critical risk</span><span>Smoke = early warning</span>
+      <span style="color: var(--fire-ink);">Red dashes = what a fire blocks</span><span style="color: var(--gold-ink);">Beacon = new opportunity</span>
+    </div>
+    <div class="dscrim" id="detail-scrim" data-act="detail-shrink" hidden></div>
+    <aside class="detail panel" id="detail" aria-live="polite"></aside>
+    <button type="button" class="nav-tab reopen" id="reopen" data-act="detail-open" hidden>SHOW DETAILS</button>
+    <main class="page" id="page" hidden></main>
+    <nav class="nav" id="nav" aria-label="Skyline"></nav>
+    <div id="demo"></div>
+    <div id="modal"></div>
+    <div class="tip" id="tip" role="tooltip" hidden></div>
+  </div>
+  <script src="data.js"></script>
+  <script src="agents.js"></script>
+  <script src="city.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
