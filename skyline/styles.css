@@ -379,3 +379,25 @@ textarea { min-height: 260px; line-height: 1.5; resize: vertical; }
 .slackform input { flex: 1 1 220px; font: inherit; font-size: 14px; border: 1.5px solid var(--ink); border-radius: 3px; padding: 7px 9px; background: #fff; }
 .pbody code { font-size: 12px; background: #fff; border: 1px solid var(--line); border-radius: 2px; padding: 0 3px; }
 a.btn { display: inline-flex; align-items: center; text-decoration: none; color: var(--ink); }
+
+/* ---------- moving the city, birds ---------- */
+.stage { touch-action: none; cursor: grab; }
+.stage.panning, .stage.panning .cbld, .stage.panning .ctag { cursor: grabbing; }
+.holder.ease { transition: transform .35s ease; }
+
+.birds { position: absolute; inset: 0; z-index: 3; pointer-events: none; overflow: hidden; }
+.flock { position: absolute; left: 0; animation-name: fly; animation-timing-function: linear; animation-fill-mode: forwards; }
+.flock.rtl { animation-name: flyback; }
+@keyframes fly { from { transform: translateX(-160px); } to { transform: translateX(calc(100vw + 160px)); } }
+@keyframes flyback { from { transform: translateX(calc(100vw + 160px)); } to { transform: translateX(-160px); } }
+.bird { position: absolute; transform-origin: 50% 70%; animation: flapwing .42s ease-in-out infinite alternate; }
+@keyframes flapwing { from { transform: scaleY(1); } to { transform: scaleY(.35); } }
+@media (prefers-reduced-motion: reduce) { .birds { display: none; } }
+
+.viewctl { position: absolute; left: 24px; bottom: 112px; z-index: 6; display: flex; align-items: center; gap: 6px; padding: 6px; }
+.vbtn { min-width: 32px; height: 32px; border: 1.5px solid var(--ink); border-radius: 3px; background: #fff; font-family: var(--cond); font-weight: 700; font-size: 16px; cursor: pointer; padding: 0 8px; }
+.vbtn.wide { font-size: 12px; letter-spacing: .08em; }
+.vbtn:hover:not(:disabled) { background: var(--cream); }
+.vbtn:disabled { opacity: .4; cursor: default; }
+.vhint { font-size: 11px; font-weight: 600; color: var(--muted); padding: 0 4px; white-space: nowrap; }
+@media (max-width: 900px) { .viewctl { left: 16px; bottom: calc(46% + 28px); } .vhint { display: none; } }

@@ -168,7 +168,8 @@
     ['stage', 'hud', 'legend'].forEach((id) => { $(id).hidden = !city; });
     if (!city) ['detail', 'detail-scrim', 'reopen'].forEach((id) => { $(id).hidden = true; });
     $('page').hidden = city;
-    if (city) { renderCity(); renderHud(); renderDetail(); } else renderPage();
+    if (city) { renderCity(); renderHud(); renderDetail(); renderViewCtl(); } else renderPage();
+    ['birds', 'viewctl'].forEach((id) => { $(id).hidden = !city; });
     renderDemo();
     renderModal();
   }
@@ -180,11 +181,14 @@
     $('plane').querySelectorAll('[data-pick]').forEach((el) => el.classList.toggle('is-sel', el.dataset.pick === S.sel));
     fit();
   }
-  function fit() {
+  // Where the city sits before you move it: scaled to the window, nudged right of the HUD.
+  function baseView() {
     const w = window.innerWidth, h = window.innerHeight;
-    const s = Math.min(w / 1560, h / 960) * (w < 900 ? 1.2 : 1);
-    // nudge the city right of the HUD on wide screens
-    $('holder').style.transform = (w < 900 ? 'translateY(-40px) ' : 'translate(' + Math.round(Math.min(60, (w - 1200) / 4)) + 'px, 34px) ') + 'scale(' + s.toFixed(3) + ')';
+    return { s: Math.min(w / 1560, h / 960) * (w < 900 ? 1.2 : 1), x: w < 900 ? 0 : Math.round(Math.min(60, (w - 1200) / 4)), y: w < 900 ? -40 : 34 };
+  }
+  function fit() {
+    const b = baseView();
+    $('holder').style.transform = 'translate(' + (b.x + VIEW.x) + 'px,' + (b.y + VIEW.y) + 'px) scale(' + (b.s * VIEW.zoom).toFixed(3) + ')';
   }
 
   const PROFILES = [
@@ -863,6 +867,118 @@
     step();
   }
 
+  // ---------------- moving the city and the birds ----------------
+  // Drag to pan, pinch or ⌘-scroll to zoom, double-click empty ground to recenter.
+  const VIEW = { x: 0, y: 0, zoom: 1 };
+  const reduceMotion = () => !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+  function renderViewCtl() {
+    const moved = VIEW.x || VIEW.y || VIEW.zoom !== 1;
+    $('viewctl').innerHTML =
+      '<button type="button" class="vbtn" data-act="zoom" data-k="0.8" aria-label="Zoom out" title="Zoom out">−</button>' +
+      '<button type="button" class="vbtn" data-act="zoom" data-k="1.25" aria-label="Zoom in" title="Zoom in">+</button>' +
+      '<button type="button" class="vbtn wide" data-act="recenter"' + (moved ? '' : ' disabled') + ' title="Put the city back (or double-click empty ground)">RECENTER</button>' +
+      '<span class="vhint">Drag to move · pinch to zoom</span>';
+  }
+
+  const stage = $('stage');
+  let drag = null, swallowClick = false;
+  function clampView() {
+    const w = window.innerWidth, h = window.innerHeight;
+    VIEW.zoom = Math.max(0.5, Math.min(2.5, VIEW.zoom));
+    VIEW.x = Math.max(-w * 0.75, Math.min(w * 0.75, VIEW.x));
+    VIEW.y = Math.max(-h * 0.75, Math.min(h * 0.75, VIEW.y));
+  }
+  /** Zoom by `k`, keeping the point under the cursor (or the window centre) where it is. */
+  function zoomAt(k, cx, cy) {
+    const b = baseView();
+    const ox = window.innerWidth / 2 + b.x + VIEW.x, oy = window.innerHeight / 2 + b.y + VIEW.y;
+    const before = VIEW.zoom;
+    VIEW.zoom *= k;
+    clampView();
+    const r = VIEW.zoom / before;
+    const px = cx == null ? window.innerWidth / 2 : cx, py = cy == null ? window.innerHeight / 2 : cy;
+    VIEW.x += (px - ox) * (1 - r);
+    VIEW.y += (py - oy) * (1 - r);
+    clampView();
+    fit();
+  }
+  function recenter() {
+    VIEW.x = 0; VIEW.y = 0; VIEW.zoom = 1;
+    const holder = $('holder');
+    holder.classList.add('ease');
+    fit();
+    setTimeout(() => holder.classList.remove('ease'), 400);
+    renderViewCtl();
+  }
+  stage.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    drag = { x: e.clientX, y: e.clientY, vx: VIEW.x, vy: VIEW.y, id: e.pointerId, moved: false };
+  });
+  window.addEventListener('pointermove', (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (!drag.moved) {
+      if (Math.hypot(dx, dy) < 5) return; // a small wobble is still a click
+      drag.moved = true;
+      stage.classList.add('panning');
+    }
+    VIEW.x = drag.vx + dx;
+    VIEW.y = drag.vy + dy;
+    clampView();
+    fit();
+  });
+  function endDrag() {
+    if (!drag) return;
+    if (drag.moved) {
+      swallowClick = true; // the click that ends a drag shouldn't select a building
+      setTimeout(() => { swallowClick = false; }, 0);
+      stage.classList.remove('panning');
+      renderViewCtl();
+    }
+    drag = null;
+  }
+  window.addEventListener('pointerup', endDrag);
+  window.addEventListener('pointercancel', endDrag);
+  document.addEventListener('click', (e) => { if (swallowClick) { e.stopPropagation(); e.preventDefault(); swallowClick = false; } }, true);
+  stage.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey) zoomAt(Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY); // pinch, or ⌘/ctrl + scroll
+    else { VIEW.x -= e.deltaX; VIEW.y -= e.deltaY; clampView(); fit(); } // two-finger scroll pans
+    renderViewCtl();
+  }, { passive: false });
+  // Safari and the menu bar app report trackpad pinches as gesture events
+  let gestureZoom = 1;
+  stage.addEventListener('gesturestart', (e) => { e.preventDefault(); gestureZoom = VIEW.zoom; });
+  stage.addEventListener('gesturechange', (e) => { e.preventDefault(); zoomAt((gestureZoom * e.scale) / VIEW.zoom, e.clientX, e.clientY); });
+  stage.addEventListener('gestureend', () => renderViewCtl());
+  stage.addEventListener('dblclick', (e) => { if (!e.target.closest('[data-pick]')) recenter(); });
+
+  // A small flock crosses the sky now and then.
+  function spawnFlock() {
+    if (!S || S.view !== 'city' || document.hidden || reduceMotion()) return;
+    const n = 3 + Math.floor(Math.random() * 4);
+    const rtl = Math.random() < 0.5;
+    const f = document.createElement('div');
+    f.className = 'flock' + (rtl ? ' rtl' : '');
+    f.style.top = (6 + Math.random() * 34) + '%';
+    f.style.animationDuration = (16 + Math.random() * 10).toFixed(1) + 's';
+    let html = '';
+    for (let i = 0; i < n; i++) {
+      // a loose V: followers trail behind the leader, alternating above and below
+      const x = (rtl ? 1 : -1) * i * (18 + Math.random() * 6);
+      const y = (i % 2 ? 1 : -1) * Math.ceil(i / 2) * (9 + Math.random() * 4);
+      const size = 0.75 + Math.random() * 0.4;
+      html += '<svg class="bird" width="' + Math.round(22 * size) + '" height="' + Math.round(12 * size) + '" viewBox="0 0 22 12" style="left:' + x.toFixed(0) + 'px;top:' + y.toFixed(0) + 'px;animation-delay:-' + (Math.random() * 0.4).toFixed(2) + 's">' +
+        '<path d="M1 8 Q6 1 11 7 Q16 1 21 8" fill="none" stroke="#26303A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    }
+    f.innerHTML = html;
+    f.addEventListener('animationend', (e) => { if (e.target === f) f.remove(); });
+    $('birds').appendChild(f);
+  }
+  (function birdLoop() { setTimeout(() => { spawnFlock(); birdLoop(); }, 15000 + Math.random() * 20000); })();
+  setTimeout(spawnFlock, 4000);
+
   // ---------------- events ----------------
   document.addEventListener('click', (ev) => {
     const el = ev.target.closest('[data-act],[data-pick]');
@@ -910,6 +1026,8 @@
       }
       case 'reset': if (S.live) clearInterval(S.live); S = fresh(); return recompute('Initial sync of Outlook and Slack');
       case 'mode': return setMode(el.dataset.mode);
+      case 'zoom': zoomAt(+el.dataset.k); return renderViewCtl();
+      case 'recenter': return recenter();
       case 'sync': return liveCall(api('/api/sync', {}), 'Synced Gmail and Slack');
       case 'live-disconnect': return liveCall(api('/api/' + el.dataset.src + '/disconnect', {}), (el.dataset.src === 'slack' ? 'Slack' : 'Gmail') + ' disconnected');
       case 'access-flip': setPath(S.access, el.dataset.path, !getPath(S.access, el.dataset.path)); return recompute('Access rules changed');
