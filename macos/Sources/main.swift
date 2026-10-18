@@ -4,13 +4,93 @@
 import AppKit
 import WebKit
 
+/// Runs the live server (server/, `node src/index.js`) in the background when it isn't
+/// already running, and stops it on quit. A server you started yourself in a terminal is
+/// used as-is and left alone.
+final class LiveServer {
+    static let url = URL(string: "http://localhost:8787/")!
+    private var process: Process?
+    private(set) var isUp = false
+    var startedHere: Bool { process?.isRunning == true }
+    let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Skyline/server.log")
+
+    /// build.sh records where server/ and node live; fall back to searching near the app.
+    var serverDir: URL? {
+        if let recorded = Bundle.main.object(forInfoDictionaryKey: "SkylineServerDir") as? String,
+           FileManager.default.fileExists(atPath: recorded + "/src/index.js") { return URL(fileURLWithPath: recorded) }
+        var dir = Bundle.main.bundleURL.deletingLastPathComponent()
+        for _ in 0..<4 {
+            if FileManager.default.fileExists(atPath: dir.appendingPathComponent("server/src/index.js").path) { return dir.appendingPathComponent("server") }
+            dir = dir.deletingLastPathComponent()
+        }
+        return nil
+    }
+    var nodePath: String? {
+        let recorded = Bundle.main.object(forInfoDictionaryKey: "SkylineNode") as? String
+        return ([recorded].compactMap { $0 } + ["/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node"])
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    func probe(_ done: @escaping (Bool) -> Void) {
+        var req = URLRequest(url: LiveServer.url.appendingPathComponent("api/snapshot"))
+        req.timeoutInterval = 1.5
+        URLSession.shared.dataTask(with: req) { [weak self] _, response, _ in
+            DispatchQueue.main.async {
+                let up = (response as? HTTPURLResponse)?.statusCode == 200
+                self?.isUp = up
+                done(up)
+            }
+        }.resume()
+    }
+
+    /// Returns a reason when it can't start.
+    func start() -> String? {
+        if startedHere { return nil }
+        guard let dir = serverDir else { return "Couldn’t find the server folder next to the app." }
+        guard FileManager.default.fileExists(atPath: dir.appendingPathComponent("node_modules").path) else { return "Run npm install in server/ first." }
+        guard let node = nodePath else { return "Node.js isn’t installed." }
+        try? FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        let log = try? FileHandle(forWritingTo: logURL)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: node)
+        p.arguments = ["src/index.js"]
+        p.currentDirectoryURL = dir
+        p.standardOutput = log
+        p.standardError = log
+        do { try p.run() } catch { return error.localizedDescription }
+        process = p
+        return nil
+    }
+
+    func stop() {
+        process?.terminate()
+        process = nil
+        isUp = false
+    }
+
+    /// Uses a running server, or starts one and waits for it (up to ~12 s).
+    func ensure(_ done: @escaping (Bool) -> Void) {
+        probe { up in
+            if up { return done(true) }
+            if self.start() != nil { return done(false) }
+            var tries = 0
+            func again() {
+                self.probe { ok in
+                    if ok { done(true) }
+                    else if tries < 24 { tries += 1; DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: again) }
+                    else { done(false) }
+                }
+            }
+            again()
+        }
+    }
+}
+
 /// Owns the one WKWebView. It moves between the popover and the window, so the city
 /// keeps its state (selection, drafts, demo clock) when you switch.
 final class SkylineWeb: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
-    /// The live server (server/, `npm start`). When it's running the app uses it, so LIVE mode works;
-    /// otherwise it falls back to the copy of the web app inside the bundle (DEMO only).
-    static let liveURL = URL(string: "http://localhost:8787/")!
-
+    let server = LiveServer()
     let webView: WKWebView
     var onFires: ((Int) -> Void)?
 
@@ -25,18 +105,12 @@ final class SkylineWeb: NSObject, WKScriptMessageHandler, WKNavigationDelegate, 
         load()
     }
 
+    /// Live server when it's (or can be made) available, so LIVE mode works; otherwise the
+    /// copy of the web app inside the bundle, which runs DEMO only.
     func load() {
-        var probe = URLRequest(url: SkylineWeb.liveURL.appendingPathComponent("api/snapshot"))
-        probe.timeoutInterval = 1.5
-        URLSession.shared.dataTask(with: probe) { [weak self] _, response, _ in
-            DispatchQueue.main.async {
-                if (response as? HTTPURLResponse)?.statusCode == 200 {
-                    self?.webView.load(URLRequest(url: SkylineWeb.liveURL))
-                } else {
-                    self?.loadBundled()
-                }
-            }
-        }.resume()
+        server.ensure { [weak self] up in
+            if up { self?.webView.load(URLRequest(url: LiveServer.url)) } else { self?.loadBundled() }
+        }
     }
 
     func loadBundled() {
@@ -53,9 +127,15 @@ final class SkylineWeb: NSObject, WKScriptMessageHandler, WKNavigationDelegate, 
         if let body = message.body as? [String: Any], let fires = body["fires"] as? Int { onFires?(fires) }
     }
 
-    // Links that leave the app (mailto:, Outlook, Slack) open in the default handler, not in the panel.
-    // Sign-in redirects (Microsoft login) stay inside so the server can finish connecting.
+    // Links that leave the app (mailto:, Gmail, Slack) open in the default handler, not in the panel.
+    // Sign-in goes to the browser too: Google refuses to sign in inside embedded web views.
+    // The panel notices the new connection on its next refresh.
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if let url = action.request.url, (url.host == "localhost" && url.path.hasPrefix("/auth/")) || (url.host ?? "").hasSuffix("accounts.google.com") {
+            NSWorkspace.shared.open(url)
+            decisionHandler(.cancel)
+            return
+        }
         if action.navigationType == .linkActivated, let url = action.request.url, url.scheme != "file", url.scheme != "about", url.host != "localhost" {
             NSWorkspace.shared.open(url)
             decisionHandler(.cancel)
@@ -140,6 +220,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let reload = NSMenuItem(title: "Reload Skyline", action: #selector(reloadWeb), keyEquivalent: "r")
         [toggle, reload].forEach { $0.target = self; menu.addItem($0) }
         menu.addItem(.separator())
+        let s = web.server
+        let state = NSMenuItem(title: s.startedHere ? "Live server: running" : s.isUp ? "Live server: running (started outside Skyline)" : "Live server: off · demo only", action: nil, keyEquivalent: "")
+        state.isEnabled = false
+        menu.addItem(state)
+        var items: [NSMenuItem] = []
+        if s.startedHere { items.append(NSMenuItem(title: "Stop Live Server", action: #selector(stopServer), keyEquivalent: "")) }
+        else if !s.isUp { items.append(NSMenuItem(title: "Start Live Server", action: #selector(reloadWeb), keyEquivalent: "")) }
+        if s.isUp { items.append(NSMenuItem(title: "Open in Browser", action: #selector(openInBrowser), keyEquivalent: "")) }
+        if FileManager.default.fileExists(atPath: s.logURL.path) { items.append(NSMenuItem(title: "Show Server Log", action: #selector(showLog), keyEquivalent: "")) }
+        items.forEach { $0.target = self; menu.addItem($0) }
+        menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Skyline", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
         statusItem.button?.performClick(nil)
@@ -173,6 +264,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc func reloadWeb() { web.load() }
+    @objc func stopServer() { web.server.stop(); web.loadBundled() }
+    @objc func openInBrowser() { NSWorkspace.shared.open(LiveServer.url) }
+    @objc func showLog() { NSWorkspace.shared.open(web.server.logURL) }
+
+    func applicationWillTerminate(_ notification: Notification) { web.server.stop() }
 
     /// No visible menu bar, but this gives text fields Cmd-C / Cmd-V / Cmd-Z / Cmd-A.
     func editMenu() -> NSMenu {
