@@ -97,8 +97,16 @@
     const C = {};
     run('discovery', () => {
       const crmByDomain = {};
-      SKY.crm.forEach((c) => { crmByDomain[c.domain] = c; });
-      const orgOf = (pid) => { const p = SKY.people[pid]; if (!p) return null; const dom = p.email.split('@')[1]; return dom === SKY.INTERNAL_DOMAIN ? null : crmByDomain[dom] || null; };
+      SKY.crm.forEach((c) => { if (!c.emails) crmByDomain[c.domain] = c; });
+      // a client is either a whole email domain or, when configured, a list of contact addresses
+      const orgOf = (pid) => {
+        const p = SKY.people[pid];
+        if (!p) return null;
+        const listed = SKY.crm.find((c) => c.emails && c.emails.indexOf(p.email) >= 0);
+        if (listed) return listed;
+        const dom = p.email.split('@')[1];
+        return dom === SKY.INTERNAL_DOMAIN ? null : crmByDomain[dom] || null;
+      };
       const resolve = (m) => {
         for (const p of [m.from].concat(m.to || [], m.cc || [])) { const c = orgOf(p); if (c) return { c, how: 'domain' }; }
         if (m.src === 'slack' && !m.dm) { const c = SKY.crm.find((x) => m.where.indexOf('#' + x.slack) === 0); if (c) return { c, how: 'channel' }; }

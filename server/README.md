@@ -1,6 +1,6 @@
 # Skyline live server
 
-Connects Skyline to your real Outlook and Slack. The server runs on your computer, reads new messages, and has Claude turn each client message into the same signals the demo uses: promises, blockers, questions, requests and progress. The web app and its agents then build the city from them.
+Connects Skyline to your real Gmail and Slack. The server runs on your computer, reads new messages, and has Claude turn each client message into the same signals the demo uses: promises, blockers, questions, requests and progress. The web app and its agents then build the city from them.
 
 Demo mode is untouched. Use the **DEMO / LIVE** switch at the top of the app to move between them.
 
@@ -23,29 +23,48 @@ Extraction uses `claude-opus-5-5` with structured output, so every answer matche
 
 Only messages tied to a client are sent, after redaction, and each message is read once.
 
-## 2. Outlook (Microsoft Graph)
+## 2. Gmail
 
-1. Go to [Microsoft Entra admin center](https://entra.microsoft.com) → **App registrations** → **New registration**.
-   - Name: `Skyline`
-   - Supported accounts: whatever fits (work accounts only, or work + personal)
-   - Redirect URI: platform **Public client/native (mobile & desktop)**, URI `http://localhost:8787/auth/outlook/callback`
-2. Under **API permissions**, add **Microsoft Graph → Delegated → `User.Read`, `Mail.Read`**. Some organizations require admin consent for `Mail.Read`.
-3. Copy the **Application (client) ID** into `.env` as `MS_CLIENT_ID`. Set `MS_TENANT` to your tenant ID to allow only your organization, or leave it as `common`.
-4. Restart the server, open Sources, and click **Connect Outlook**.
+This needs no company admin: you create the Google sign-in yourself, in a free Google Cloud project.
 
-Skyline asks only to read mail. It never sends anything. "Open in Outlook" opens a pre-filled draft or meeting in Outlook on the web, and you press Send yourself. `OUTLOOK_WEB` picks work (`outlook.office.com`) or personal (`outlook.live.com`).
+1. In [Google Cloud console](https://console.cloud.google.com), create a project, for example `Skyline`.
+2. **APIs & Services → Library**: enable the **Gmail API**.
+3. **APIs & Services → OAuth consent screen** (Google Auth Platform):
+   - User type **External**. Choose **Internal** instead if your Google Workspace allows it; that also avoids the 7-day expiry below.
+   - Add the scope `https://www.googleapis.com/auth/gmail.readonly`.
+   - Under **Test users** (Audience), add your own Gmail address.
+4. **Credentials → Create credentials → OAuth client ID**, application type **Desktop app**. No redirect URI needs registering, because desktop clients accept any `127.0.0.1` address.
+5. Copy the client ID and client secret into `.env` as `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
+6. Restart the server, open Sources, and click **Connect Gmail**. Google will say the app isn't verified, because it's your own app. Choose **Continue**.
 
-By default it reads **Inbox** and **Sent Items**. Turn other folders on in Sources.
+Two things to know:
+
+- **7-day expiry:** while the app's publishing status is **Testing**, Google expires the sign-in after 7 days, and Skyline will ask you to connect Gmail again. Publishing the app (or making it Internal on Workspace) removes the limit.
+- **Your own team:** if your address is a personal `@gmail.com`, set `SKYLINE_INTERNAL_DOMAIN` to your team's domain if you have one. Otherwise everyone counts as an outside contact.
+
+Skyline asks only to read mail (`gmail.readonly`) and never sends anything. "Open in Gmail" opens a pre-filled draft, and a meeting opens a pre-filled Google Calendar event; you send them yourself.
+
+By default it reads **Inbox** and **Sent**. Turn on Starred, Important or your own labels in Sources. Promotions, social and forum mail are always skipped.
 
 ## 3. Slack
 
-1. Create an app at [api.slack.com/apps](https://api.slack.com/apps) (**From scratch**).
-2. Under **OAuth & Permissions**, add these **User Token Scopes** (or Bot Token Scopes):
-   `channels:read channels:history groups:read groups:history im:read im:history mpim:read mpim:history users:read users:read.email team:read`
-3. **Install to Workspace** and copy the token (`xoxp-…` user token or `xoxb-…` bot token).
-4. Paste it on the Sources page, or put it in `.env` as `SLACK_TOKEN`.
+Use a **user token** (`xoxp-…`). Skyline then reads the channels you're already in, and nothing has to be invited.
 
-A bot token only sees channels the bot has been invited to. A user token sees the channels you're in. Direct messages are off until you turn them on. Thread replies aren't read yet; only top-level messages are.
+1. Create an app at [api.slack.com/apps](https://api.slack.com/apps): **Create New App → From scratch**, then pick your workspace.
+2. Open **OAuth & Permissions**. Under **User Token Scopes** (not Bot Token Scopes), add:
+   `channels:read` `channels:history` `groups:read` `groups:history` `im:read` `im:history` `mpim:read` `mpim:history` `users:read` `users:read.email` `team:read`
+3. Click **Install to Workspace** and allow. Some workspaces send this to an admin for approval first.
+4. Copy the **User OAuth Token** (starts with `xoxp-`) and put it in `.env` as `SLACK_TOKEN`, or paste it on the Sources page.
+
+If you change scopes later, click **Reinstall to Workspace**. That gives you a new token to copy.
+
+Direct messages stay off until you turn them on in Sources. Thread replies aren't read yet, only top-level messages.
+
+<details><summary>Using a bot token instead</summary>
+
+A bot token (`xoxb-…`) works too, but add the same scopes under **Bot Token Scopes**, and `/invite` the app into every channel you want Skyline to read. It can't see your DMs.
+
+</details>
 
 ## How clients are found
 
@@ -64,7 +83,7 @@ Slack channels belong to a client when their name starts with the client's domai
 
 | Variable | Default | |
 |---|---|---|
-| `PORT` | `8787` | Must match the Outlook redirect URI |
+| `PORT` | `8787` | Where the app and the Gmail sign-in redirect live |
 | `SKYLINE_LOOKBACK_DAYS` | `21` | How far back the first sync reads |
 | `SKYLINE_SYNC_MINUTES` | `5` | Minutes between automatic syncs; `0` turns it off |
 | `SKYLINE_INTERNAL_DOMAIN` | your email's domain | Which domain counts as your team |
@@ -72,6 +91,6 @@ Slack channels belong to a client when their name starts with the client's domai
 
 ## Not yet covered
 
-- Teams meeting transcripts, which need an extra admin-consented Graph permission.
+- Meeting transcripts (Google Meet or Teams).
 - Slack thread replies.
 - Renaming discovered clients from the UI. Today you set `clientNames` in `data/store.json`.

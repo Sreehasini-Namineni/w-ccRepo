@@ -22,9 +22,9 @@ export const secrets = read('secrets.json', {});
 export function saveSecrets() { write('secrets.json', secrets); }
 
 const EMPTY = {
-  outlook: { me: null, folders: [], cursor: {} },
+  gmail: { me: null, labels: [], cursor: {} },
   slack: { team: null, me: null, channels: [], cursor: {}, users: {} },
-  access: { outlook: { folders: {} }, slack: { channels: {}, dms: false }, redact: true },
+  access: { mail: { labels: {} }, slack: { channels: {}, dms: false }, redact: true },
   messages: {},   // id -> normalized message
   signals: {},    // id -> extracted signals (present once a message has been through Claude)
   clientNames: {}, // domain -> display name override

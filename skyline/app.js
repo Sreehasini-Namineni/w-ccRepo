@@ -28,7 +28,7 @@
 
   // ---------------- data sources: the demo corpus or the live server ----------------
   // Demo mode uses the mock corpus in data.js. Live mode swaps in a snapshot from
-  // server/ (real Outlook + Slack messages with Claude-extracted signals). The agents
+  // server/ (real Gmail + Slack messages with Claude-extracted signals). The agents
   // and the city run unchanged on either.
   const DEMO = { messages: SKY.messages, people: SKY.people, crm: SKY.crm, internal: SKY.INTERNAL_DOMAIN, access: SKY.defaultAccess, shared: SKY.sharedChannels, events: SKY.connectorEvents };
   const SERVED = location.protocol === 'http:' || location.protocol === 'https:';
@@ -487,14 +487,14 @@
   function sendMeeting() {
     const d = S.modal.draft;
     const at = d.slots[d.slot];
-    if (isLive()) openInOutlook('meeting', { subject: d.title, body: d.agenda, to: d.emails, startdt: new Date(at).toISOString(), enddt: new Date(t(at) + d.minutes * 60000).toISOString() });
+    if (isLive()) openInGoogle('meeting', { subject: d.title, body: d.agenda, to: d.emails.replace(/\s+/g, ''), start: at, end: t(at) + d.minutes * 60000 });
     const watchUntil = F.iso(new Date(t(at) + (d.minutes + 120) * 60000));
     S.followUps[d.id] = { kind: 'meeting', sentAt: S.now, to: d.to, meetingAt: at, subject: d.title, watchUntil };
     S.messages.push({ id: 'out-' + (S.messages.length + 1), src: 'email', where: 'Sent', ts: S.now, from: ME(), to: [d.to], subject: 'Invitation: ' + d.title, body: d.agenda, thread: 'fu-' + d.id, signals: [] });
     S.modal = null;
     const ev = recompute('You booked “' + d.title + '”').filter((e) => e.client === S.client);
     S.toast = { tone: 'ok', at: S.now, client: S.client, sel: ev[0] && ev[0].sel, title: ev[0] ? ev[0].title : 'Meeting booked',
-      body: 'Invite sent to ' + first(d.to) + ' for ' + F.dt(at) + '. Skyline relights the alarm if nothing has moved by ' + F.dt(watchUntil) + '.' };
+      body: (isLive() ? 'Google Calendar opened with the invite for ' : 'Invite sent to ') + first(d.to) + ' for ' + F.dt(at) + '. Skyline relights the alarm if nothing has moved by ' + F.dt(watchUntil) + '.' };
     render();
   }
 
@@ -581,15 +581,18 @@
     return { kind, id, tone: tone || 'neutral', to, cc, toEmail: to ? SKY.people[to].email : '', ccEmail: cc.map((x) => SKY.people[x].email).join(', '), subject, body, ctx: [...new Set(ctx)] };
   }
 
-  // Live mode never sends on its own: it opens Outlook on the web with the draft or invite filled in.
-  function openInOutlook(kind, fields) {
-    const base = (LIVE && LIVE.outlookWeb) || 'https://outlook.office.com';
-    const q = new URLSearchParams(fields);
-    window.open(base + (kind === 'meeting' ? '/calendar/deeplink/compose?' : '/mail/deeplink/compose?') + q.toString(), '_blank', 'noopener');
+  // Live mode never sends on its own: it opens Gmail (or Google Calendar) with the draft filled in.
+  function openInGoogle(kind, f) {
+    const stamp = (d) => new Date(d).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, ''); // 20261019T140000Z
+    const qs = (o) => Object.keys(o).map((k) => k + '=' + encodeURIComponent(o[k] || '')).join('&'); // %20, not +, for spaces
+    const url = kind === 'meeting'
+      ? 'https://calendar.google.com/calendar/render?' + qs({ action: 'TEMPLATE', text: f.subject, details: f.body, dates: stamp(f.start) + '/' + stamp(f.end), add: f.to })
+      : 'https://mail.google.com/mail/?' + qs({ view: 'cm', fs: '1', to: f.to, cc: f.cc, su: f.subject, body: f.body });
+    window.open(url, '_blank', 'noopener');
   }
   function sendDraft() {
     const d = S.modal.draft;
-    if (isLive()) openInOutlook('mail', { to: d.toEmail, cc: d.ccEmail, subject: d.subject, body: d.body });
+    if (isLive()) openInGoogle('mail', { to: d.toEmail, cc: d.ccEmail, subject: d.subject, body: d.body });
     const toId = Object.keys(SKY.people).find((id) => SKY.people[id].email === d.toEmail.trim()) || null;
     const watchUntil = nextBizMorning(S.now);
     S.followUps[d.id] = { sentAt: S.now, to: toId, subject: d.subject, kind: d.kind, watchUntil };
@@ -599,7 +602,7 @@
     const internal = toId && SKY.people[toId].email.indexOf(SKY.INTERNAL_DOMAIN) >= 0;
     S.toast = { tone: 'ok', at: S.now, sel: ev[0] && ev[0].sel, client: S.client,
       title: ev[0] ? ev[0].title : d.kind === 'opp' ? 'Handed to ' + pname(toId) : 'Follow-up sent to ' + (toId ? first(toId) : d.toEmail),
-      body: internal && d.kind === 'opp' ? 'The opportunity stays lit until the account exec picks it up.' : (ev[0] ? 'Follow-up sent to ' + (toId ? first(toId) : d.toEmail) + '. ' : '') + 'Skyline is watching for ' + (toId ? first(toId) + '’s' : 'a') + ' reply and relights the alarm if there is none by ' + F.dt(watchUntil) + '.' };
+      body: internal && d.kind === 'opp' ? 'The opportunity stays lit until the account exec picks it up.' : (ev[0] ? (isLive() ? 'Gmail opened with your follow-up to ' : 'Follow-up sent to ') + (toId ? first(toId) : d.toEmail) + '. ' : '') + 'Skyline is watching for ' + (toId ? first(toId) + '’s' : 'a') + ' reply and relights the alarm if there is none by ' + F.dt(watchUntil) + '.' };
     render();
   }
 
@@ -648,14 +651,14 @@
     const count = (f) => SKY.messages.filter(f).length;
     const tog = (kind, key, on, label, n, sub) => '<label class="tog"><input type="checkbox" data-act="live-access" data-kind="' + kind + '" data-key="' + esc(key) + '"' + (on ? ' checked' : '') + '><span>' + esc(label) + (sub ? '<span class="sub">' + esc(sub) + '</span>' : '') + '</span>' + (n === null ? '' : '<span class="cnt">' + plural(n, 'message') + '</span>') + '</label>';
     const pill = (on, yes, no) => '<span class="pill ' + (on ? 'on' : 'off') + '">' + (on ? yes : no) + '</span>';
-    const outlook = '<div class="panel"><div class="phead teal"><span>OUTLOOK</span><span>' + esc(st.outlook.account || 'MICROSOFT 365') + '</span></div><div class="pbody">' +
-      (!st.outlook.configured
-        ? '<div class="conn">' + pill(false, '', 'NOT SET UP') + '</div><p class="note">Register an app in Microsoft Entra and put its client ID in <code>server/.env</code> as <code>MS_CLIENT_ID</code>, then restart the server. Steps are in server/README.md.</p>'
-        : st.outlook.connected
-          ? '<div class="conn">' + pill(true, 'CONNECTED', '') + '<button type="button" class="btn btn-sm" data-act="live-disconnect" data-src="outlook">Disconnect</button></div>' +
-            '<div>' + st.folders.map((f) => tog('folder', f, A.outlook.folders[f] !== false && A.outlook.folders[f] !== undefined, f, count((m) => m.src === 'email' && m.where === f), /^(inbox|sent items)$/i.test(f) ? '' : 'Off unless you turn it on')).join('') + '</div>' +
-            '<p class="note">Read-only (Mail.Read). Turning a folder off deletes what Skyline stored from it.</p>'
-          : '<div class="conn">' + pill(false, '', 'NOT CONNECTED') + '<a class="btn btn-p btn-sm" href="/auth/outlook/start">CONNECT OUTLOOK</a></div><p class="note">You’ll sign in with Microsoft. Skyline asks only to read your mail.</p>') + '</div></div>';
+    const mail = '<div class="panel"><div class="phead teal"><span>GMAIL</span><span>' + esc(st.gmail.account || 'GOOGLE') + '</span></div><div class="pbody">' +
+      (!st.gmail.configured
+        ? '<div class="conn">' + pill(false, '', 'NOT SET UP') + '</div><p class="note">Create a Google OAuth client (type “Desktop app”) and put its ID and secret in <code>server/.env</code> as <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code>, then restart the server. Steps are in server/README.md.</p>'
+        : st.gmail.connected
+          ? '<div class="conn">' + pill(true, 'CONNECTED', '') + '<button type="button" class="btn btn-sm" data-act="live-disconnect" data-src="gmail">Disconnect</button></div>' +
+            '<div>' + st.labels.map((f) => tog('folder', f, A.outlook.folders[f] !== false && A.outlook.folders[f] !== undefined, f, count((m) => m.src === 'email' && m.where === f), /^(inbox|sent)$/i.test(f) ? '' : 'Off unless you turn it on')).join('') + '</div>' +
+            '<p class="note">Read-only (gmail.readonly). Promotions and social mail are skipped. Turning a label off deletes what Skyline stored from it.</p>'
+          : '<div class="conn">' + pill(false, '', 'NOT CONNECTED') + '<a class="btn btn-p btn-sm" href="/auth/google/start">CONNECT GMAIL</a></div><p class="note">You’ll sign in with Google. Skyline asks only to read your mail. Google may warn that the app is unverified, because it’s your own app; choose Continue.</p>') + '</div></div>';
     const slack = '<div class="panel"><div class="phead teal"><span>SLACK</span><span>' + esc(st.slack.team || 'WORKSPACE') + '</span></div><div class="pbody">' +
       (st.slack.connected
         ? '<div class="conn">' + pill(true, 'CONNECTED', '') + (st.slack.fromEnv ? '<span class="note">Token from server/.env</span>' : '<button type="button" class="btn btn-sm" data-act="live-disconnect" data-src="slack">Disconnect</button>') + '</div>' +
@@ -673,8 +676,8 @@
       '<div class="row"><button type="button" class="btn btn-p" data-act="sync"' + (st.syncing ? ' disabled' : '') + '>' + (st.syncing ? 'SYNCING…' : 'SYNC NOW') + '</button></div>' +
       '<div class="facts-k">RECENT EVENTS</div><ul class="list">' + (LIVE.events.slice(0, 8).map((e) => '<li><span class="pill ' + ({ ok: 'on', warn: 'warn', bad: 'bad' }[e.level] || 'on') + '">' + esc(e.source.toUpperCase()) + '</span><span>' + esc(e.text) + '</span><span class="when">' + esc(F.dt(e.at)) + '</span></li>').join('') || '<li class="empty">Nothing yet.</li>') + '</ul></div></div>';
     const disc = discoveredHtml();
-    return '<div><h1>Sources · live</h1><p class="lede">Your real Outlook and Slack. The Skyline server on this computer reads new messages, finds clients by their email domains, and has Claude pull out promises, blockers, questions and requests. Switch to DEMO at the top any time.</p></div>' +
-      '<div class="grid2">' + outlook + slack + claude + sync + '</div><h2>Discovered automatically</h2>' + (disc ? '<div class="grid2">' + disc + '</div>' : '<div class="panel"><div class="pbody"><p class="empty">No clients yet. Skyline treats an outside email domain as a client once you have two or more messages with it. Connect a source and sync.</p></div></div>');
+    return '<div><h1>Sources · live</h1><p class="lede">Your real Gmail and Slack. The Skyline server on this computer reads new messages, finds clients by their email domains, and has Claude pull out promises, blockers, questions and requests. Switch to DEMO at the top any time.</p></div>' +
+      '<div class="grid2">' + mail + slack + claude + sync + '</div><h2>Discovered automatically</h2>' + (disc ? '<div class="grid2">' + disc + '</div>' : '<div class="panel"><div class="pbody"><p class="empty">No clients yet. Skyline treats an outside email domain as a client once you have two or more messages with it. Connect a source and sync.</p></div></div>');
   }
 
   function sourcesPage() {
@@ -750,8 +753,8 @@
         '<textarea aria-label="Email body" data-draft="body">' + esc(d.body) + '</textarea>' +
         '<div class="ctx"><span>Context used:</span>' + d.ctx.map((x) => '<span class="chip">' + esc(x) + '</span>').join('') + '</div>' +
         '<div class="row"><span class="note">Tone</span><span class="seg" role="group" aria-label="Tone">' + ['friendly', 'neutral', 'firm'].map((x) => '<button type="button" data-act="tone" data-tone="' + x + '" aria-pressed="' + (d.tone === x) + '">' + x.toUpperCase() + '</button>').join('') + '</span></div>' +
-        '<div class="row"><button type="button" class="btn btn-p' + (d.kind === 'nudge' && findItem(d.id).i.kind === 'fire' ? ' btn-fire' : '') + '" data-act="send">' + (isLive() ? 'OPEN IN OUTLOOK' : 'SEND') + '</button><button type="button" class="btn" data-act="close">Cancel</button></div>' +
-        '<p class="note">' + (isLive() ? 'Opens Outlook with this email filled in. Nothing goes out until you press Send there. Skyline starts watching for a reply now.' : 'Nothing is sent until you press Send. In this demo Send records the email in your Sent folder and starts the reply watch; no real mail leaves the browser.') + '</p>';
+        '<div class="row"><button type="button" class="btn btn-p' + (d.kind === 'nudge' && findItem(d.id).i.kind === 'fire' ? ' btn-fire' : '') + '" data-act="send">' + (isLive() ? 'OPEN IN GMAIL' : 'SEND') + '</button><button type="button" class="btn" data-act="close">Cancel</button></div>' +
+        '<p class="note">' + (isLive() ? 'Opens Gmail with this email filled in. Nothing goes out until you press Send there. Skyline starts watching for a reply now.' : 'Nothing is sent until you press Send. In this demo Send records the email in your Sent folder and starts the reply watch; no real mail leaves the browser.') + '</p>';
     } else if (md.type === 'meeting') {
       const d = md.draft;
       title = 'MEETING INVITE · REVIEW BEFORE SENDING';
@@ -760,8 +763,8 @@
         '<div class="field"><label>When</label><div class="slots" role="radiogroup" aria-label="Suggested times">' + d.slots.map((x, k) => '<button type="button" class="slot" role="radio" aria-checked="' + (d.slot === k) + '" data-act="slot" data-k="' + k + '">' + esc(F.dt(x)) + '</button>').join('') + '</div></div>' +
         '<div class="field"><label for="m-len">Length</label><select id="m-len" data-draft="minutes">' + [15, 20, 30, 45].map((m) => '<option value="' + m + '"' + (+d.minutes === m ? ' selected' : '') + '>' + m + ' minutes</option>').join('') + '</select></div>' +
         '<textarea aria-label="Agenda" data-draft="agenda">' + esc(d.agenda) + '</textarea>' +
-        '<div class="row"><button type="button" class="btn btn-p" data-act="send-meeting">' + (isLive() ? 'OPEN IN OUTLOOK' : 'SEND INVITE') + '</button><button type="button" class="btn" data-act="close">Cancel</button></div>' +
-        '<p class="note">' + (isLive() ? 'Opens a new Outlook meeting with this filled in. Nothing goes out until you press Send there.' : 'Suggested times are the next working slots. A Teams link is added when the invite goes out. In this demo the invite stays in the browser.') + '</p>';
+        '<div class="row"><button type="button" class="btn btn-p" data-act="send-meeting">' + (isLive() ? 'OPEN IN GOOGLE CALENDAR' : 'SEND INVITE') + '</button><button type="button" class="btn" data-act="close">Cancel</button></div>' +
+        '<p class="note">' + (isLive() ? 'Opens a new Google Calendar event with this filled in and the guests added. Nothing goes out until you press Save there.' : 'Suggested times are the next working slots. A Teams link is added when the invite goes out. In this demo the invite stays in the browser.') + '</p>';
     } else if (md.type === 'correct') {
       title = 'CORRECT THIS INSIGHT';
       body = '<form data-form="correct" class="cform-wrap">' + correctForm(md.id) + '</form>';
@@ -773,7 +776,7 @@
 
   function messageCard(m, quote) {
     if (!m) return '<div class="empty">That message is no longer available under your access rules.</div>';
-    const kind = m.src === 'meeting' ? 'TEAMS TRANSCRIPT · ' + m.where.toUpperCase() + ' @ ' + m.offset : m.src === 'slack' ? 'SLACK · ' + m.where.toUpperCase() : 'OUTLOOK · ' + m.where.toUpperCase();
+    const kind = m.src === 'meeting' ? 'TEAMS TRANSCRIPT · ' + m.where.toUpperCase() + ' @ ' + m.offset : m.src === 'slack' ? 'SLACK · ' + m.where.toUpperCase() : (isLive() ? 'GMAIL · ' : 'OUTLOOK · ') + m.where.toUpperCase();
     let text = esc(m.body);
     if (quote) {
       const idx = m.body.toLowerCase().indexOf(quote.toLowerCase());
@@ -781,7 +784,7 @@
     }
     if (m.src === 'meeting') text = text.split('\n').map((l) => l.replace(/^([A-Z][a-z]+):/, '<span class="spk">$1:</span>')).join('\n');
     const whoList = (ids) => (ids || []).map((p) => who(p)).join(', ');
-    return '<div class="msg-card"><div class="msg-src"><span>' + esc(kind) + '</span>' + (m.redacted ? '<span class="pill warn">REDACTED BY SKYLINE</span>' : '') + (m.link ? '<a href="' + esc(m.link) + '" target="_blank" rel="noopener">' : '<a href="#" data-act="noop">') + 'Open in ' + (m.src === 'slack' ? 'Slack' : 'Outlook') + ' ↗</a></div>' +
+    return '<div class="msg-card"><div class="msg-src"><span>' + esc(kind) + '</span>' + (m.redacted ? '<span class="pill warn">REDACTED BY SKYLINE</span>' : '') + (m.link ? '<a href="' + esc(m.link) + '" target="_blank" rel="noopener">' : '<a href="#" data-act="noop">') + 'Open in ' + (m.src === 'slack' ? 'Slack' : isLive() ? 'Gmail' : 'Outlook') + ' ↗</a></div>' +
       '<dl class="msg-meta"><dt>From</dt><dd><b>' + esc(pname(m.from)) + '</b> &lt;' + esc(SKY.people[m.from].email) + '&gt;</dd>' +
       (m.to && m.to.length ? '<dt>' + (m.src === 'meeting' ? 'With' : 'To') + '</dt><dd>' + whoList(m.to) + (m.cc ? ' · cc ' + whoList(m.cc) : '') + '</dd>' : '') +
       '<dt>When</dt><dd>' + esc(F.dt(m.ts)) + (m.src === 'meeting' ? ' · at ' + esc(m.offset) + ' in the recording' : '') + '</dd>' +
@@ -907,8 +910,8 @@
       }
       case 'reset': if (S.live) clearInterval(S.live); S = fresh(); return recompute('Initial sync of Outlook and Slack');
       case 'mode': return setMode(el.dataset.mode);
-      case 'sync': return liveCall(api('/api/sync', {}), 'Synced Outlook and Slack');
-      case 'live-disconnect': return liveCall(api('/api/' + el.dataset.src + '/disconnect', {}), (el.dataset.src === 'slack' ? 'Slack' : 'Outlook') + ' disconnected');
+      case 'sync': return liveCall(api('/api/sync', {}), 'Synced Gmail and Slack');
+      case 'live-disconnect': return liveCall(api('/api/' + el.dataset.src + '/disconnect', {}), (el.dataset.src === 'slack' ? 'Slack' : 'Gmail') + ' disconnected');
       case 'access-flip': setPath(S.access, el.dataset.path, !getPath(S.access, el.dataset.path)); return recompute('Access rules changed');
       case 'bus': S.busScope = el.dataset.scope; return render();
     }
@@ -966,7 +969,7 @@
     if (el.dataset.act === 'profile-select') { S.profile = el.value; return render(); }
     if (el.dataset.act === 'live-access') {
       const k = el.dataset.kind, key = el.dataset.key, on = el.checked;
-      const access = k === 'folder' ? { outlook: { folders: { [key]: on } } } : k === 'channel' ? { slack: { channels: { [key]: on } } } : k === 'dms' ? { slack: { dms: on } } : { redact: on };
+      const access = k === 'folder' ? { mail: { labels: { [key]: on } } } : k === 'channel' ? { slack: { channels: { [key]: on } } } : k === 'dms' ? { slack: { dms: on } } : { redact: on };
       return liveCall(api('/api/settings', { access }), 'Access rules changed: ' + (k === 'redact' ? 'redaction' : key) + ' ' + (on ? 'on' : 'off'));
     }
     if (el.dataset.act === 'access') { setPath(S.access, el.dataset.path, el.checked); recompute('Access rules changed: ' + el.dataset.path.split('.').pop() + ' ' + (el.checked ? 'on' : 'off')); }
@@ -1009,7 +1012,7 @@
     if (S && S.live) clearInterval(S.live);
     S = fresh(mode);
     if (mode === 'live' && location.hash === '#sources') S.view = 'sources';
-    recompute(mode === 'live' ? 'Loaded live data from Outlook and Slack' : 'Initial sync of Outlook and Slack');
+    recompute(mode === 'live' ? 'Loaded live data from Gmail and Slack' : 'Initial sync of Outlook and Slack');
     clearInterval(poll);
     if (mode === 'live') {
       let last = JSON.stringify([LIVE.status.lastSync, LIVE.messages.length, LIVE.status.syncing, LIVE.status.pending]);
@@ -1018,7 +1021,7 @@
           const snap = await api('/api/snapshot');
           const sig = JSON.stringify([snap.status.lastSync, snap.messages.length, snap.status.syncing, snap.status.pending]);
           const changed = sig !== last;
-          if (changed || t(F.iso(new Date())) - t(S.now) > 5 * 60000) { last = sig; refreshLive(snap, changed ? 'New messages from Outlook and Slack' : 'Checked for new messages'); }
+          if (changed || t(F.iso(new Date())) - t(S.now) > 5 * 60000) { last = sig; refreshLive(snap, changed ? 'New messages from Gmail and Slack' : 'Checked for new messages'); }
         } catch (e) { /* server restarting; try again next tick */ }
       }, 20000);
     }

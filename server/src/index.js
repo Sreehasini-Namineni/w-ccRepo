@@ -1,44 +1,49 @@
-// Skyline live server: serves the web app, connects Outlook and Slack, and turns new
+// Skyline live server: serves the web app, connects Gmail and Slack, and turns new
 // messages into signals with Claude. Listens on localhost only.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT, db, saveDb, secrets, logEvent, loadEnv } from './store.js';
-import * as outlook from './outlook.js';
+import * as gmail from './gmail.js';
 import * as slack from './slack.js';
-import { addPerson, domainOf, discoverClients, resolveClient, fromOutlook, fromSlack, localIso } from './normalize.js';
+import { addPerson, domainOf, discoverClients, configuredClients, resolveClient, fromGmail, fromSlack, localIso, PUBLIC_MAIL } from './normalize.js';
 import { extractBatch, Anthropic } from './extract.js';
 
 loadEnv();
 const PORT = +process.env.PORT || 8787;
 const ORIGINS = new Set([`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`]);
-const REDIRECT = `http://localhost:${PORT}/auth/outlook/callback`;
+// Google "Desktop app" clients accept any loopback redirect, so nothing has to be registered.
+const REDIRECT = `http://127.0.0.1:${PORT}/auth/google/callback`;
 const WEB_DIR = path.join(ROOT, '..', 'skyline');
 const LOOKBACK_DAYS = +process.env.SKYLINE_LOOKBACK_DAYS || 21;
 const BATCH = 12;
 db.people = db.people || {};
 
 // ---------------------------------------------------------------- helpers
-const meEmail = () => (db.outlook.me && db.outlook.me.email) || (db.slack.me && db.slack.me.email) || '';
-const internalDomain = () => process.env.SKYLINE_INTERNAL_DOMAIN || domainOf(meEmail());
+const meEmail = () => (db.gmail.me && db.gmail.me.email) || (db.slack.me && db.slack.me.email) || '';
+// On a public address (you@gmail.com) only you are internal; otherwise your whole domain is.
+const internalDomain = () => process.env.SKYLINE_INTERNAL_DOMAIN || (PUBLIC_MAIL.has(domainOf(meEmail())) ? '' : domainOf(meEmail()));
+const isInternal = (id) => id === meEmail() || (!!internalDomain() && domainOf(id) === internalDomain());
 const slackName = (c) => (c.dm ? null : '#' + c.name);
 
 function sourceEnabled(m) {
   if (m.src === 'slack') return m.dm ? !!db.access.slack.dms : db.access.slack.channels[m.where] !== false;
-  return db.access.outlook.folders[m.where] !== false;
+  return (m.labels || [m.where]).some((l) => db.access.mail.labels[l] !== false);
 }
+/** The label a message is shown under: the first one you've left on. */
+const shownLabel = (m) => (m.labels || [m.where]).find((l) => db.access.mail.labels[l] !== false) || m.where;
 /** Turning a source off deletes what Skyline stored from it. */
 function prune() {
   for (const id of Object.keys(db.messages)) {
     const m = db.messages[id];
-    const gone = (m.src === 'email' && !outlook.connected()) || (m.src === 'slack' && !slack.connected());
+    const gone = (m.src === 'email' && !gmail.connected()) || (m.src === 'slack' && !slack.connected());
     if (gone || !sourceEnabled(m)) { delete db.messages[id]; delete db.signals[id]; }
   }
 }
 
 // ---------------------------------------------------------------- sync
 let syncing = null;
-const OFFLINE = !!process.env.SKYLINE_OFFLINE; // serve stored data only; no Outlook/Slack/Claude calls (dev and tests)
+const OFFLINE = !!process.env.SKYLINE_OFFLINE; // serve stored data only; no Gmail/Slack/Claude calls (dev and tests)
 export function sync(reason) {
   if (OFFLINE) return Promise.resolve(reason);
   if (!syncing) syncing = runSync(reason).finally(() => { syncing = null; });
@@ -49,20 +54,37 @@ async function runSync(reason) {
   const since = new Date(Date.now() - LOOKBACK_DAYS * 864e5);
   const people = db.people;
 
-  if (outlook.connected()) {
+  if (gmail.connected() && Date.now() < (db.gmail.pausedUntil || 0)) {
+    logEvent('Gmail', 'warn', `Paused after Google's rate limit. Resuming at ${localIso(db.gmail.pausedUntil).slice(11)}.`);
+  } else if (gmail.connected()) {
+    let n = 0;
     try {
-      if (!db.outlook.me) db.outlook.me = await outlook.me();
-      addPerson(people, db.outlook.me.email, db.outlook.me.name);
-      db.outlook.folders = await outlook.folders();
-      db.outlook.folders.forEach((f) => { if (db.access.outlook.folders[f.name] === undefined) db.access.outlook.folders[f.name] = /^(inbox|sent items)$/i.test(f.name); });
-      let n = 0;
-      for (const f of db.outlook.folders.filter((x) => db.access.outlook.folders[x.name])) {
-        const list = await outlook.messagesSince(f.id, db.outlook.cursor[f.id] || since.toISOString());
-        list.forEach((m) => { const msg = fromOutlook(m, f.name, people, db.access.redact); if (msg) { db.messages[msg.id] = msg; n++; } });
-        if (list.length) db.outlook.cursor[f.id] = list[list.length - 1].receivedDateTime;
+      if (!db.gmail.me) db.gmail.me = await gmail.me();
+      addPerson(people, db.gmail.me.email, db.gmail.me.name);
+      db.gmail.labels = await gmail.labels();
+      db.gmail.labels.forEach((l) => { if (db.access.mail.labels[l.name] === undefined) db.access.mail.labels[l.name] = l.id === 'INBOX' || l.id === 'SENT'; });
+      const firstCap = +process.env.SKYLINE_FIRST_SYNC_CAP || 150;
+      for (const l of db.gmail.labels.filter((x) => db.access.mail.labels[x.name])) {
+        await gmail.readLabel(l.id, db.gmail.cursor[l.id] || +since, (m) => {
+          db.gmail.cursor[l.id] = Math.max(db.gmail.cursor[l.id] || 0, +m.internalDate); // resume point
+          const msg = fromGmail(m, l.name, people, db.access.redact);
+          if (msg) {
+            const had = db.messages[msg.id];
+            // one Gmail message can carry several labels: keep it once, remember all of them
+            if (had) { if (!had.labels.includes(l.name)) had.labels.push(l.name); }
+            else { msg.labels = [l.name]; db.messages[msg.id] = msg; n++; }
+          }
+          if (n % 20 === 0) saveDb();
+        }, firstCap);
       }
-      logEvent('Outlook', 'ok', `Synced ${n} new message${n === 1 ? '' : 's'}.`);
-    } catch (e) { logEvent('Outlook', 'warn', e.message); }
+      db.gmail.pausedUntil = 0;
+      logEvent('Gmail', 'ok', `Synced ${n} new message${n === 1 ? '' : 's'}.`);
+    } catch (e) {
+      if (e instanceof gmail.RateLimited) {
+        db.gmail.pausedUntil = Date.now() + 2 * 60000; // don't hammer the quota on every Sync press
+        logEvent('Gmail', 'warn', `Google is rate-limiting Gmail reads. Kept the ${n} message${n === 1 ? '' : 's'} read so far and will continue in about 2 minutes.`);
+      } else logEvent('Gmail', 'warn', e.message);
+    }
   }
 
   if (slack.connected()) {
@@ -143,9 +165,11 @@ function clientContext(c, batch) {
   }));
   const ids = new Set();
   batch.forEach((m) => [m.from].concat(m.to || [], m.cc || []).forEach((p) => ids.add(p)));
-  Object.keys(db.people).filter((p) => domainOf(p) === internal).slice(0, 40).forEach((p) => ids.add(p));
+  if (meEmail()) ids.add(meEmail());
+  Object.keys(db.people).filter(isInternal).slice(0, 40).forEach((p) => ids.add(p));
   const people = [...ids].filter((p) => db.people[p]).map((p) => ({
-    id: p, name: db.people[p].name, org: domainOf(p) === internal ? 'internal team' : domainOf(p) === c.domain ? c.name : 'other'
+    id: p, name: db.people[p].name,
+    org: p === meEmail() ? 'internal team (the user)' : isInternal(p) ? 'internal team' : (c.emails ? c.emails.includes(p) : domainOf(p) === c.domain) ? c.name : 'other'
   }));
   return { client: { name: c.name, domain: c.domain }, today: localIso(new Date()), people, workstreams: [...ws], keys: [...keys.values()].slice(-80), messages: batch };
 }
@@ -159,27 +183,27 @@ function snapshot() {
   const people = {};
   Object.keys(db.people).forEach((id) => {
     const p = db.people[id];
-    people[id] = { name: p.name, email: p.email, role: p.role || (domainOf(id) === internal ? 'Teammate' : (crm.find((c) => c.domain === domainOf(id)) || {}).name || domainOf(id)), you: id === me || undefined };
+    const client = crm.find((c) => (c.emails ? c.emails.includes(id) : c.domain === domainOf(id)));
+    people[id] = { name: p.name, email: p.email, role: p.role || (client ? client.name : isInternal(id) ? 'Teammate' : domainOf(id)), you: id === me || undefined };
   });
-  if (me && !people[me]) people[me] = { name: (db.outlook.me && db.outlook.me.name) || (db.slack.me && db.slack.me.name) || 'Me', email: me, role: 'You', you: true };
+  if (me && !people[me]) people[me] = { name: (db.gmail.me && db.gmail.me.name) || (db.slack.me && db.slack.me.name) || 'Me', email: me, role: 'You', you: true };
   const shared = {};
   db.slack.channels.forEach((c) => { if (c.shared && !c.dm) shared[slackName(c)] = true; });
   const pending = all.filter((m) => !db.signals[m.id] && resolveClient(m, crm, internal)).length;
   return {
     mode: 'live', meId: me, internalDomain: internal, people, crm, sharedChannels: shared,
-    messages: all.map((m) => Object.assign({}, m, { signals: db.signals[m.id] || [] })),
+    messages: all.map((m) => Object.assign({}, m, { where: m.src === 'email' ? shownLabel(m) : m.where, signals: db.signals[m.id] || [] })),
     access: {
-      outlook: { on: outlook.connected(), account: me || '', transcripts: false, folders: Object.assign({}, db.access.outlook.folders) },
+      outlook: { on: gmail.connected(), account: me || '', transcripts: false, folders: Object.assign({}, db.access.mail.labels) }, // email access (web app key name)
       slack: { on: slack.connected(), workspace: (db.slack.team && db.slack.team.name) || '', dms: !!db.access.slack.dms, channels: Object.assign({}, db.access.slack.channels) },
       redact: db.access.redact
     },
     events: db.events.map((e) => ({ at: localIso(e.at), source: e.source, level: e.level, text: e.text })),
-    outlookWeb: process.env.OUTLOOK_WEB || 'https://outlook.office.com',
     status: {
-      outlook: { configured: outlook.configured(), connected: outlook.connected(), account: (db.outlook.me && db.outlook.me.email) || '' },
+      gmail: { configured: gmail.configured(), connected: gmail.connected(), account: (db.gmail.me && db.gmail.me.email) || '' },
       slack: { connected: slack.connected(), team: (db.slack.team && db.slack.team.name) || '', fromEnv: !!process.env.SLACK_TOKEN && !(secrets.slack && secrets.slack.token) },
       syncing: !!syncing, lastSync: db.lastSync && localIso(db.lastSync), pending, usage: db.usage,
-      folders: db.outlook.folders.map((f) => f.name), channels: db.slack.channels.filter((c) => !c.dm).map(slackName), dmCount: db.slack.channels.filter((c) => c.dm).length
+      labels: db.gmail.labels.map((l) => l.name), channels: db.slack.channels.filter((c) => !c.dm).map(slackName), dmCount: db.slack.channels.filter((c) => c.dm).length
     }
   };
 }
@@ -203,7 +227,7 @@ const server = http.createServer(async (req, res) => {
       const body = await readJson(req);
       if (body.access) {
         const a = body.access;
-        if (a.outlook && a.outlook.folders) Object.assign(db.access.outlook.folders, a.outlook.folders);
+        if (a.mail && a.mail.labels) Object.assign(db.access.mail.labels, a.mail.labels);
         if (a.slack && a.slack.channels) Object.assign(db.access.slack.channels, a.slack.channels);
         if (a.slack && typeof a.slack.dms === 'boolean') db.access.slack.dms = a.slack.dms;
         if (typeof a.redact === 'boolean') db.access.redact = a.redact;
@@ -222,19 +246,21 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, snapshot());
     }
     if (url.pathname === '/api/slack/disconnect' && req.method === 'POST') { slack.disconnect(); db.slack = { team: null, me: null, channels: [], cursor: {}, users: {} }; prune(); saveDb(); return send(res, 200, snapshot()); }
-    if (url.pathname === '/api/outlook/disconnect' && req.method === 'POST') { outlook.disconnect(); db.outlook = { me: null, folders: [], cursor: {} }; prune(); saveDb(); return send(res, 200, snapshot()); }
-    if (url.pathname === '/auth/outlook/start') {
-      if (!outlook.configured()) return send(res, 400, page('Outlook isn’t set up yet', 'Add <code>MS_CLIENT_ID</code> to <code>server/.env</code> (see server/README.md), restart the server, and try again.'), 'text/html; charset=utf-8');
-      res.writeHead(302, { Location: outlook.authUrl(REDIRECT) });
+    if (url.pathname === '/api/gmail/disconnect' && req.method === 'POST') { gmail.disconnect(); db.gmail = { me: null, labels: [], cursor: {} }; prune(); saveDb(); return send(res, 200, snapshot()); }
+    if (url.pathname === '/auth/google/start') {
+      if (!gmail.configured()) return send(res, 400, page('Gmail isn’t set up yet', 'Add <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code> to <code>server/.env</code> (see server/README.md), restart the server, and try again.'), 'text/html; charset=utf-8');
+      res.writeHead(302, { Location: gmail.authUrl(REDIRECT) });
       return res.end();
     }
-    if (url.pathname === '/auth/outlook/callback') {
-      if (url.searchParams.get('error')) return send(res, 400, page('Outlook sign-in was cancelled', url.searchParams.get('error_description') || url.searchParams.get('error')), 'text/html; charset=utf-8');
-      try { await outlook.finishSignIn({ code: url.searchParams.get('code'), state: url.searchParams.get('state'), redirectUri: REDIRECT }); } catch (e) { return send(res, 400, page('Outlook sign-in failed', e.message), 'text/html; charset=utf-8'); }
-      db.outlook = { me: null, folders: [], cursor: {} };
-      logEvent('Outlook', 'ok', 'Connected.');
-      sync('outlook connected');
-      res.writeHead(302, { Location: '/?mode=live#sources' });
+    if (url.pathname === '/auth/google/callback') {
+      const back = (msg) => page('Gmail sign-in ' + msg[0], msg[1]).replace('href="/"', `href="http://localhost:${PORT}/"`);
+      if (url.searchParams.get('error')) return send(res, 400, back(['was cancelled', url.searchParams.get('error')]), 'text/html; charset=utf-8');
+      try { await gmail.finishSignIn({ code: url.searchParams.get('code'), state: url.searchParams.get('state'), redirectUri: REDIRECT }); } catch (e) { return send(res, 400, back(['failed', e.message]), 'text/html; charset=utf-8'); }
+      db.gmail = { me: null, labels: [], cursor: {} };
+      logEvent('Gmail', 'ok', 'Connected.');
+      sync('gmail connected');
+      // back to the address you started from (the redirect itself lands on 127.0.0.1)
+      res.writeHead(302, { Location: `http://localhost:${PORT}/?mode=live#sources` });
       return res.end();
     }
     // static web app
@@ -250,10 +276,10 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`Skyline live server: http://localhost:${PORT}`);
-  console.log(`  Outlook: ${outlook.configured() ? (outlook.connected() ? 'connected' : 'ready to connect') : 'not set up (MS_CLIENT_ID missing)'}`);
+  console.log(`  Gmail:   ${gmail.configured() ? (gmail.connected() ? 'connected' : 'ready to connect') : 'not set up (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET missing)'}`);
   console.log(`  Slack:   ${slack.connected() ? 'connected' : 'not connected'}`);
   if (OFFLINE) console.log('  Offline: serving stored data, not syncing');
-  if (outlook.connected() || slack.connected()) sync('startup');
+  if (gmail.connected() || slack.connected()) sync('startup');
   const every = process.env.SKYLINE_SYNC_MINUTES === undefined ? 5 : +process.env.SKYLINE_SYNC_MINUTES;
-  if (every > 0) setInterval(() => { if (outlook.connected() || slack.connected()) sync('scheduled'); }, every * 60000);
+  if (every > 0) setInterval(() => { if (gmail.connected() || slack.connected()) sync('scheduled'); }, every * 60000);
 });

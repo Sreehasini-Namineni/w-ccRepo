@@ -8,7 +8,7 @@ This is a working front-end prototype. The visual design is ported from `../ADP 
 
 Open `index.html` in a browser. There is no build step and no server, and plain `<script>` tags work from `file://`. Fonts load from Google Fonts; without a network connection the system fonts are used instead.
 
-**Demo or live.** The **DEMO / LIVE** switch at the top chooses the data. Demo is the mock corpus below and works anywhere. Live reads your real Outlook and Slack through the local server in `../server`: run `npm start` there and open http://localhost:8787. See [server/README.md](../server/README.md) for setup.
+**Demo or live.** The **DEMO / LIVE** switch at the top chooses the data. Demo is the mock corpus below and works anywhere. Live reads your real Gmail and Slack through the local server in `../server`: run `npm start` there and open http://localhost:8787. See [server/README.md](../server/README.md) for setup.
 
 In demo mode, use **DEMO ▾** (top right) to drive the story:
 
@@ -30,7 +30,7 @@ In demo mode, use **DEMO ▾** (top right) to drive the story:
 
 **What is mocked (demo mode only):** the connectors and the extraction model. Each message carries `signals` (commitment, waiting-on, question, opportunity, progress, and so on) that stand in for what an LLM extraction step would return. Everything after that is real logic: client and workstream discovery, alias merging, dependency chains, fire-or-smoke decisions, quote verification, follow-up tracking and relighting.
 
-Live mode does exactly that. The server reads Microsoft Graph and Slack, and Claude generates `signals` for each client message, so `runPipeline` runs unchanged on either source.
+Live mode does exactly that. The server reads Gmail and Slack, and Claude generates `signals` for each client message, so `runPipeline` runs unchanged on either source.
 
 ### The agents
 

@@ -1,7 +1,7 @@
-// Turns Outlook and Slack messages into the message shape the Skyline agents read
+// Turns Gmail and Slack messages into the message shape the Skyline agents read
 // (the same shape as the demo corpus in skyline/data.js), and discovers clients.
 
-const PUBLIC_MAIL = new Set(['gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.com', 'live.com', 'msn.com', 'yahoo.com', 'icloud.com', 'me.com', 'aol.com', 'proton.me', 'protonmail.com']);
+export const PUBLIC_MAIL = new Set(['gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.com', 'live.com', 'msn.com', 'yahoo.com', 'icloud.com', 'me.com', 'aol.com', 'proton.me', 'protonmail.com']);
 const AUTOMATED = /^(no-?reply|do-?not-?reply|notifications?|notify|mailer-daemon|postmaster|newsletters?|bounces?|calendar|alerts?|marketing|digest)\b[^@]*@/i;
 const pad = (n) => String(n).padStart(2, '0');
 
@@ -28,6 +28,7 @@ export function cleanEmailBody(text) {
   const out = [];
   for (const line of String(text || '').replace(/\r/g, '').split('\n')) {
     if (out.length && /^\s*(-{2,}\s*Original Message|From:\s.+|On .+ wrote:\s*$|_{8,})/i.test(line)) break;
+    if (out.length && /^\s*wrote:\s*$/i.test(line) && /^\s*On\s/.test(out[out.length - 1])) { out.pop(); break; }
     if (/^\s*>/.test(line)) continue;
     out.push(line);
   }
@@ -43,16 +44,51 @@ export function addPerson(people, email, name, extra) {
   return id;
 }
 
-export function fromOutlook(m, folderName, people, redactOn) {
-  const pid = (r) => (r && r.emailAddress && r.emailAddress.address ? addPerson(people, r.emailAddress.address, r.emailAddress.name) : null);
-  const from = pid(m.from);
-  if (!from || isAutomated(from)) return null;
-  const body = cleanEmailBody(m.body && m.body.content);
+/** "Name <a@b.com>, "Last, First" <c@d.com>" -> [{ name, email }] */
+export function parseAddresses(value) {
+  const parts = [];
+  let cur = '', quoted = false;
+  for (const ch of String(value || '')) {
+    if (ch === '"') quoted = !quoted;
+    if (ch === ',' && !quoted) { parts.push(cur); cur = ''; } else cur += ch;
+  }
+  parts.push(cur);
+  return parts.map((p) => {
+    const m = p.match(/<([^>]+)>/);
+    const email = (m ? m[1] : p).trim().replace(/^mailto:/i, '');
+    return email.includes('@') ? { name: m ? p.slice(0, m.index).replace(/"/g, '').trim() : '', email } : null;
+  }).filter(Boolean);
+}
+
+const header = (m, name) => { const h = ((m.payload && m.payload.headers) || []).find((x) => x.name.toLowerCase() === name); return h ? h.value : ''; };
+const decode = (data) => Buffer.from(data, 'base64url').toString('utf8');
+function findPart(part, type) {
+  if (!part) return null;
+  if (part.mimeType === type && part.body && part.body.data) return part.body.data;
+  for (const p of part.parts || []) { const hit = findPart(p, type); if (hit) return hit; }
+  return null;
+}
+/** Plain text if the message has it, otherwise the HTML part with tags stripped. */
+function gmailBody(payload) {
+  const plain = findPart(payload, 'text/plain');
+  if (plain) return decode(plain);
+  const html = findPart(payload, 'text/html');
+  if (!html) return '';
+  return decode(html).replace(/<(style|script)[\s\S]*?<\/\1>/gi, '').replace(/<br\s*\/?>|<\/(p|div|li|tr)>/gi, '\n').replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;|&apos;/g, "'").replace(/&quot;/g, '"');
+}
+
+export function fromGmail(m, labelName, people, redactOn) {
+  const sender = parseAddresses(header(m, 'from'))[0];
+  if (!sender || isAutomated(sender.email)) return null;
+  const from = addPerson(people, sender.email, sender.name);
+  const pids = (h) => parseAddresses(header(m, h)).map((a) => addPerson(people, a.email, a.name));
+  const body = cleanEmailBody(gmailBody(m.payload));
   const r = redactOn ? redact(body) : { text: body, redacted: false };
   return {
-    id: 'o:' + m.id, msgId: m.internetMessageId || m.id, src: 'email', where: folderName, ts: localIso(m.receivedDateTime),
-    from, to: (m.toRecipients || []).map(pid).filter(Boolean), cc: (m.ccRecipients || []).map(pid).filter(Boolean),
-    subject: m.subject || '(no subject)', body: r.text, redacted: r.redacted || undefined, thread: m.conversationId, link: m.webLink
+    id: 'g:' + m.id, msgId: header(m, 'message-id') || m.id, src: 'email', where: labelName, ts: localIso(+m.internalDate),
+    from, to: pids('to'), cc: pids('cc'), subject: header(m, 'subject') || '(no subject)', body: r.text, redacted: r.redacted || undefined,
+    thread: m.threadId, link: `https://mail.google.com/mail/u/0/#all/${m.threadId}`
   };
 }
 
@@ -93,28 +129,48 @@ function baseName(domain) {
 }
 
 /**
- * Clients are the external email domains you actually correspond with (two or more
- * messages), minus public mail providers and automated senders. A real CRM could
- * replace this; names can be overridden from the Sources page.
+ * Clients you name yourself, by contact address, in SKYLINE_TEST_CLIENTS:
+ *   "Brightline Logistics: a@gmail.com, b@gmail.com; Harbor & Pine Clinics: c@gmail.com"
+ * These count as clients even on public mail domains (useful for testing with Gmail).
+ */
+export function configuredClients() {
+  return String(process.env.SKYLINE_TEST_CLIENTS || '').split(';').map((part) => {
+    const i = part.indexOf(':');
+    if (i < 0) return null;
+    const name = part.slice(0, i).trim();
+    const emails = part.slice(i + 1).split(',').map((e) => e.trim().toLowerCase()).filter((e) => e.includes('@'));
+    if (!name || !emails.length) return null;
+    const word = name.split(/\s+/)[0];
+    // `domain` is a label here, never a real domain, so it can't capture other Gmail users
+    return { id: slug(name), name, short: word, domain: 'test contacts', emails, slack: slug(word) };
+  }).filter(Boolean);
+}
+
+/**
+ * Clients are the clients you configured (above) plus the external email domains you
+ * actually correspond with (two or more messages), minus public mail providers and
+ * automated senders. A real CRM could replace this.
  */
 export function discoverClients(messages, internalDomain, names) {
+  const configured = configuredClients();
+  const listed = new Set([].concat(...configured.map((c) => c.emails)));
   const counts = {};
   messages.forEach((m) => {
-    const doms = new Set([m.from].concat(m.to || [], m.cc || []).filter((p) => !isAutomated(p)).map(domainOf));
+    const doms = new Set([m.from].concat(m.to || [], m.cc || []).filter((p) => !isAutomated(p) && !listed.has(p)).map(domainOf));
     doms.forEach((d) => { if (d && d !== internalDomain && !PUBLIC_MAIL.has(d) && !d.endsWith('.local')) counts[d] = (counts[d] || 0) + 1; });
   });
-  return Object.keys(counts).filter((d) => counts[d] >= 2).sort((a, b) => counts[b] - counts[a]).map((domain) => {
+  return configured.concat(Object.keys(counts).filter((d) => counts[d] >= 2).sort((a, b) => counts[b] - counts[a]).map((domain) => {
     const base = baseName(domain);
     // `short` is what mention-matching looks for, so it stays the domain's base word
     // ("Brightline") even when the display name is overridden ("Brightline Logistics").
     return { id: slug(base), name: names[domain] || title(base), short: title(base), domain, slack: slug(base) };
-  });
+  }));
 }
 
 /** Same rule the Cartographer agent uses: external participant, then channel prefix, then a mention. */
 export function resolveClient(m, crm, internalDomain) {
   for (const p of [m.from].concat(m.to || [], m.cc || [])) {
-    const c = crm.find((x) => x.domain === domainOf(p));
+    const c = crm.find((x) => (x.emails && x.emails.includes(p)) || (!x.emails && x.domain === domainOf(p)));
     if (c) return c;
   }
   if (m.src === 'slack' && !m.dm) { const c = crm.find((x) => m.where.indexOf('#' + x.slack) === 0); if (c) return c; }
